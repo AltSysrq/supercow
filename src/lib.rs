@@ -7,7 +7,7 @@
 // except according to those terms.
 
 use std::borrow::{Borrow, ToOwned};
-use std::convert::From;
+use std::convert::{AsRef, From};
 use std::cmp;
 use std::fmt;
 use std::mem;
@@ -554,6 +554,26 @@ where BORROWED : 'a + Hash,
       SPECIAL : ConstDeref<Target = BORROWED> {
     fn hash<H : Hasher>(&self, h: &mut H) {
         (**self).hash(h)
+    }
+}
+
+impl<'a, OWNED, BORROWED : ?Sized, SPECIAL> Borrow<BORROWED>
+for Supercow<'a, OWNED, BORROWED, SPECIAL>
+where BORROWED : 'a + Hash,
+      &'a BORROWED : PointerFirstRef,
+      SPECIAL : ConstDeref<Target = BORROWED> {
+    fn borrow(&self) -> &BORROWED {
+        self.deref()
+    }
+}
+
+impl<'a, OWNED, BORROWED : ?Sized, SPECIAL> AsRef<BORROWED>
+for Supercow<'a, OWNED, BORROWED, SPECIAL>
+where BORROWED : 'a + Hash,
+      &'a BORROWED : PointerFirstRef,
+      SPECIAL : ConstDeref<Target = BORROWED> {
+    fn as_ref(&self) -> &BORROWED {
+        self.deref()
     }
 }
 
