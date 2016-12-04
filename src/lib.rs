@@ -137,6 +137,12 @@ pub mod aux {
     unsafe impl<'a> PointerFirstRef for &'a ::std::ffi::CStr { }
     unsafe impl<'a> PointerFirstRef for &'a ::std::ffi::OsStr { }
     unsafe impl<'a> PointerFirstRef for &'a ::std::path::Path { }
+
+    /// Like `std::convert::From`, but without the blanket implementations that
+    /// cause problems for `supercow_features!`.
+    pub trait SpecialFrom<T> {
+        fn special_from(t: T) -> Self;
+    }
 }
 
 use self::aux::*;
@@ -189,6 +195,12 @@ macro_rules! supercow_features {
                 Box::new(cloned)
             }
         }
+        impl<'a, T : $feature_name<'a>> $crate::aux::SpecialFrom<T>
+        for Box<$feature_name<'a, Target = T::Target> + 'a> {
+            fn special_from(t: T) -> Self {
+                Box::new(t)
+            }
+        }
         impl<'a, S : 'a + ?Sized> Clone for Box<$feature_name<'a, Target = S> + 'a> {
             fn clone(&self) -> Self {
                 $feature_name::clone_boxed(&**self)
@@ -202,6 +214,12 @@ macro_rules! supercow_features {
         }
         impl<'a, T : 'a + $($req +)* $crate::aux::ConstDeref>
         $feature_name<'a> for T {
+        }
+        impl<'a, T : $feature_name<'a>> $crate::aux::SpecialFrom<T>
+        for Box<$feature_name<'a, Target = T::Target> + 'a> {
+            fn special_from(t: T) -> Self {
+                Box::new(t)
+            }
         }
     };
 }
@@ -279,8 +297,9 @@ where OWNED : Borrow<BORROWED>,
         Self::from_data(Borrowed(inner.borrow()))
     }
 
-    pub fn special<T : Into<SPECIAL>>(inner: T) -> Self {
-        Self::from_data(Special(inner.into()))
+    pub fn special<T>(inner: T) -> Self
+    where SPECIAL : SpecialFrom<T> {
+        Self::from_data(Special(SPECIAL::special_from(inner)))
     }
 
     fn from_data(data: SupercowData<'a, OWNED, BORROWED, SPECIAL>) -> Self {
@@ -579,6 +598,8 @@ where BORROWED : 'a + Hash,
 
 #[cfg(test)]
 mod test {
+    use std::sync::Arc;
+
     use super::*;
 
     #[test]
@@ -612,5 +633,11 @@ mod test {
         c.to_mut().push_str(" world");
         assert_eq!(a, b);
         assert_eq!(c, "hello world");
+    }
+
+    #[test]
+    fn default_accepts_arc() {
+        let x: Supercow<u32> = Supercow::special(Arc::new(42u32));
+        assert_eq!(42, *x);
     }
 }
