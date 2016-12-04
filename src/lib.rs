@@ -575,11 +575,37 @@ macro_rules! supercow_features {
 }
 
 supercow_features!(
-    /// The default feature set for shared `Supercow` references.
-    pub trait DefaultFeatures: Clone);
+    /// The default shared reference type for `Supercow`.
+    ///
+    /// This requires the shared reference type to be `Clone`, `Send`, and
+    /// `Sync`, which thus disqualifies using `Rc`. This was chosen as the
+    /// default since the inability to use `Rc` is generally a less subtle
+    /// issue than the `Supercow` not being `Send` or `Sync`.
+    ///
+    /// See also `NonSyncFeatures`.
+    pub trait DefaultFeatures: Clone, Send, Sync);
 supercow_features!(
-    /// The feature set used for `ASupercow` references.
-    pub trait SyncFeatures: Clone, Send, Sync);
+    /// The shared reference type for `NonSyncSupercow`.
+    ///
+    /// Unlike `DefaultFeatures`, this only requires the shared reference type
+    /// to be `Clone`, thus permitting `Rc`.
+    pub trait NonSyncFeatures: Clone);
+
+/// `Supercow` with the default `SHARED` changed to `NonSyncFeatures`, enabling
+/// the use of `Rc` as a shared reference type.
+///
+/// ## Example
+///
+/// ```
+/// use supercow::{NonSyncSupercow, Supercow};
+///
+/// # fn main() {
+/// let x: NonSyncSupercow<u32> = Supercow::owned(42u32);
+/// println!("{}", *x);
+/// # }
+/// ```
+pub type NonSyncSupercow<'a, OWNED, BORROWED = OWNED> =
+    Supercow<'a, OWNED, BORROWED, Box<NonSyncFeatures<'a, Target = BORROWED> + 'a>>;
 
 pub struct Supercow<'a, OWNED, BORROWED : ?Sized = OWNED,
                     SHARED = Box<DefaultFeatures<'a, Target = BORROWED> + 'a>>
