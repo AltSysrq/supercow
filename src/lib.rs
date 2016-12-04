@@ -383,6 +383,43 @@ where OWNED : Borrow<BORROWED>,
 
 impl<'a, OWNED, BORROWED : ?Sized, SHARED>
 Supercow<'a, OWNED, BORROWED, SHARED>
+where OWNED : Borrow<BORROWED>,
+      BORROWED : 'a + ToOwned<Owned = OWNED>,
+      for<'l> &'l BORROWED : PointerFirstRef,
+      SHARED : ConstDeref<Target = BORROWED> {
+    pub fn take_ownership(this: Self)
+                          -> Supercow<'static, OWNED, BORROWED, SHARED> {
+        match this.state {
+            Owned(o) => Supercow {
+                ptr_mask: this.ptr_mask,
+                ptr_displacement: unsafe {
+                    &*(this.ptr_displacement as *const BORROWED)
+                },
+                state: Owned(o),
+            },
+            Borrowed(r) => Supercow::owned(r.to_owned()),
+            Shared(ref s) => Supercow::owned(s.const_deref().to_owned()),
+        }
+    }
+}
+
+impl<'a, OWNED, BORROWED : ?Sized, SHARED>
+Supercow<'a, OWNED, BORROWED, SHARED>
+where OWNED : Borrow<BORROWED>,
+      BORROWED : 'a + ToOwned<Owned = OWNED>,
+      &'a BORROWED : PointerFirstRef,
+      SHARED : ConstDeref<Target = BORROWED> {
+    pub fn into_inner(this: Self) -> OWNED {
+        match this.state {
+            Owned(o) => o,
+            Borrowed(r) => r.to_owned(),
+            Shared(ref s) => s.const_deref().to_owned(),
+        }
+    }
+}
+
+impl<'a, OWNED, BORROWED : ?Sized, SHARED>
+Supercow<'a, OWNED, BORROWED, SHARED>
 where OWNED : SafeBorrow<BORROWED>,
       BORROWED : 'a + ToOwned<Owned = OWNED>,
       &'a BORROWED : PointerFirstRef,
@@ -578,7 +615,7 @@ where BORROWED : 'a + Hash,
 
 impl<'a, OWNED, BORROWED : ?Sized, SHARED> Borrow<BORROWED>
 for Supercow<'a, OWNED, BORROWED, SHARED>
-where BORROWED : 'a + Hash,
+where BORROWED : 'a,
       &'a BORROWED : PointerFirstRef,
       SHARED : ConstDeref<Target = BORROWED> {
     fn borrow(&self) -> &BORROWED {
@@ -588,7 +625,7 @@ where BORROWED : 'a + Hash,
 
 impl<'a, OWNED, BORROWED : ?Sized, SHARED> AsRef<BORROWED>
 for Supercow<'a, OWNED, BORROWED, SHARED>
-where BORROWED : 'a + Hash,
+where BORROWED : 'a,
       &'a BORROWED : PointerFirstRef,
       SHARED : ConstDeref<Target = BORROWED> {
     fn as_ref(&self) -> &BORROWED {
