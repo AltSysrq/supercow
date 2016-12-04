@@ -6,6 +6,356 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+//! `Supercow` is `Cow` on steroids.
+//!
+//! `Supercow` provides a mechanism for making APIs that accept very general
+//! references while maintaining very low overhead for usages not involving
+//! heavy-weight references (eg, `Arc`). Though nominally similar to `Cow` in
+//! structure (and being named after it), `Supercow` does not require the
+//! containee to be `Clone` or `ToOwned` unless operations inherently depending
+//! on either are invoked.
+//!
+//! # Quick Start
+//!
+//! ## Simple Types
+//!
+//! In many cases, you can think of a `Supercow` as having only one lifetime
+//! parameter and one type parameter, corresponding to the lifetime and type of
+//! an immutable reference.
+//!
+//! ```
+//! extern crate supercow;
+//!
+//! use std::sync::Arc;
+//! use supercow::Supercow;
+//!
+//! # fn main() {
+//! // Declare some data we want to reference.
+//! let fourty_two = 42u32;
+//! // Make a Supercow referencing the above.
+//! // N.B. Type inference doesn't work reliably if there is nothing explicitly
+//! // typed to which the Supercow is passed, so we declare the type of this
+//! // variable explicitly.
+//! let mut a: Supercow<u32> = Supercow::borrowed(&fourty_two);
+//! // We can deref `a` to a `u32`, and also see that it does
+//! // indeed reference `fourty_two`.
+//! assert_eq!(42, *a);
+//! assert_eq!(&fourty_two as *const u32, &*a as *const u32);
+//!
+//! // Clone `a` so that it also points to `fourty_two`.
+//! let mut b = a.clone();
+//! assert_eq!(42, *b);
+//! assert_eq!(&fourty_two as *const u32, &*b as *const u32);
+//!
+//! // `to_mut()` can be used to mutate `a` and `b` independently, taking
+//! // ownership as needed.
+//! *a.to_mut() += 2;
+//! assert_eq!(42, fourty_two);
+//! assert_eq!(44, *a);
+//! assert_eq!(42, *b);
+//! assert_eq!(&fourty_two as *const u32, &*b as *const u32);
+//!
+//! *b.to_mut() = 56;
+//! assert_eq!(44, *a);
+//! assert_eq!(56, *b);
+//! assert_eq!(42, fourty_two);
+//!
+//! // We can also use `Arc` transparently.
+//! let mut c: Supercow<u32> = Supercow::shared(Arc::new(99));
+//! assert_eq!(99, *c);
+//! *c.to_mut() += 1;
+//! assert_eq!(100, *c);
+//! # }
+//! ```
+//!
+//! ## Owned/Borrowed Types
+//!
+//! `Supercow` can have different owned and borrowed types, for example
+//! `String` and `str`. In this case, the two are separate type parameters,
+//! with the owned one written first. (Both need to be listed explicitly since
+//! `Supercow` does not require the contained value to be `ToOwned`.)
+//!
+//! ```
+//! extern crate supercow;
+//!
+//! use std::sync::Arc;
+//! use supercow::Supercow;
+//!
+//! # fn main() {
+//! let hello: Supercow<String, str> = Supercow::borrowed("hello");
+//! let mut hello_world = hello.clone();
+//! hello_world.to_mut().push_str(" world");
+//!
+//! assert_eq!(hello, "hello");
+//! assert_eq!(hello_world, "hello world");
+//! # }
+//! ```
+//!
+//! ## Accepting `Supercow` in an API
+//!
+//! If you want to make an API taking `Supercow` values, the recommended
+//! approach is to accept anything that is `Into<Supercow<YourType>>`, which
+//! allows bare owned types and references to owned values to be accepted as
+//! well.
+//!
+//! ```
+//! use std::sync::Arc;
+//! use supercow::Supercow;
+//!
+//! fn some_api_function<'a, T : Into<Supercow<'a,u32>>>
+//!   (t: T) -> Supercow<'a,u32>
+//! {
+//!   let mut x = t.into();
+//!   *x.to_mut() *= 2;
+//!   x
+//! }
+//!
+//! fn main() {
+//!   assert_eq!(42, *some_api_function(21));
+//!   let twenty_one = 21;
+//!   assert_eq!(42, *some_api_function(&twenty_one));
+//!   assert_eq!(42, *some_api_function(Supercow::shared(Arc::new(21))));
+//! }
+//! ```
+//!
+//! # Use Cases
+//!
+//! ## More flexible Copy-on-Write
+//!
+//! `std::borrow::Cow` only supports two modes of ownership: You either fully
+//! own the value, or only borrow it. `Rc` and `Arc` have the `make_mut()`
+//! method, which allows either total ownership or shared ownership. `Supercow`
+//! supports all three: owned, shared, and borrowed.
+//!
+//! ## More flexible Copy-if-Needed
+//!
+//! A major use of `Cow` in `std` is found on functions like
+//! `OsStr::to_string_lossy()`, which returns a borrowed view into itself if
+//! possible, or an owned string if it needed to change something. If the
+//! caller does not intend to do its own writing, this is more a "copy if
+//! needed" structure, and the fact that it requires the contained value to be
+//! `ToOwned` limits it to things that can be cloned.
+//!
+//! `Supercow` only requires `ToOwned` if the caller actually intends to invoke
+//! functionality which requires cloning a borrowed value, so it can fit this
+//! use-case even for non-cloneable types.
+//!
+//! ## Working around awkward lifetimes
+//!
+//! This is the original case for which `Supercow` was designed.
+//!
+//! Say you have an API with a sort of hierarchical structure of heavyweight
+//! resources, for example handles to a local database and tables within it. A
+//! natural representation may be to make the table handle hold a reference to
+//! the database handle.
+//!
+//! ```norun
+//! struct Database;
+//! impl Database {
+//!   fn new() -> Self {
+//!     // Computation...
+//!     Database
+//!   }
+//!   fn close(self) -> bool {
+//!     // Eg, it returns an error on failure or something
+//!     true
+//!   }
+//! }
+//! impl Drop for Database {
+//!   fn drop(&mut self) {
+//!     println!("Dropping database");
+//!   }
+//! }
+//! struct Table<'a>(&'a Database);
+//! impl<'a> Table<'a> {
+//!   fn new(db: &'a Database) -> Self {
+//!     // Computation...
+//!     Table(db)
+//!   }
+//! }
+//! impl<'a> Drop for Table<'a> {
+//!   fn drop(&mut self) {
+//!     println!("Dropping table");
+//!     // Notify `self.db` about this
+//!   }
+//! }
+//! ```
+//!
+//! We can use this quite easily:
+//!
+//! ```
+//! # struct Database;
+//! # impl Database {
+//! #   fn new() -> Self {
+//! #     // Computation...
+//! #     Database
+//! #   }
+//! #   fn close(self) -> bool {
+//! #     // Eg, it returns an error on failure or something
+//! #     true
+//! #   }
+//! # }
+//! # impl Drop for Database {
+//! #   fn drop(&mut self) {
+//! #     println!("Dropping database");
+//! #   }
+//! # }
+//! # struct Table<'a>(&'a Database);
+//! # impl<'a> Table<'a> {
+//! #   fn new(db: &'a Database) -> Self {
+//! #     // Computation...
+//! #     Table(db)
+//! #   }
+//! # }
+//! # impl<'a> Drop for Table<'a> {
+//! #   fn drop(&mut self) {
+//! #     println!("Dropping table");
+//! #     // Notify `self.db` about this
+//! #   }
+//! # }
+//!
+//! # #[allow(unused_variables)]
+//! fn main() {
+//!   let db = Database::new();
+//!   {
+//!     let table1 = Table::new(&db);
+//!     let table2 = Table::new(&db);
+//!     do_stuff(&table1);
+//!     // Etc
+//!   }
+//!   assert!(db.close());
+//! }
+//!
+//! # #[allow(unused_variables)]
+//! fn do_stuff(table: &Table) {
+//!   // Stuff
+//! }
+//! ```
+//!
+//! That is, until we want to hold the database and the tables in a struct.
+//!
+//! ```ignore
+//! struct Resources {
+//!   db: Database,
+//!   table: Table<'?>, // Uh, what is the lifetime here?
+//! }
+//! ```
+//!
+//! There are several options here:
+//!
+//! - Change the API to use `Arc`s or similar. This works, but adds overhead
+//! for clients that don't need it, and additionally removes from everybody the
+//! ability to statically know whether `db.close()` can be called.
+//!
+//! - Force clients to resort to unsafety, such as
+//! [`OwningHandle`](http://kimundi.github.io/owning-ref-rs/owning_ref/struct.OwningHandle.html).
+//! This sacrifices no performance and allows the stack-based client usage to
+//! be able to call `db.close()` easily, but makes things much more difficult
+//! for other clients.
+//!
+//! - Take a `Borrow` type parameter. This works and is zero-overhead, but
+//! results in a proliferation of generics throughout the API and client code,
+//! and becomes especially problematic when the hierarchy is multiple such
+//! levels deep.
+//!
+//! - Use `Supercow` to get the best of both worlds.
+//!
+//! We can adapt and use the API like so:
+//!
+//! ```
+//! use std::sync::Arc;
+//!
+//! use supercow::Supercow;
+//!
+//! struct Database;
+//! impl Database {
+//!   fn new() -> Self {
+//!     // Computation...
+//!     Database
+//!   }
+//!   fn close(self) -> bool {
+//!     // Eg, it returns an error on failure or something
+//!     true
+//!   }
+//! }
+//! impl Drop for Database {
+//!   fn drop(&mut self) {
+//!     println!("Dropping database");
+//!   }
+//! }
+//! struct Table<'a>(Supercow<'a, Database>);
+//! impl<'a> Table<'a> {
+//!   fn new<T : Into<Supercow<'a, Database>>>(db: T) -> Self {
+//!     // Computation...
+//!     Table(db.into())
+//!   }
+//! }
+//! impl<'a> Drop for Table<'a> {
+//!   fn drop(&mut self) {
+//!     println!("Dropping table");
+//!     // Notify `self.db` about this
+//!   }
+//! }
+//!
+//! // The original stack-based code, unmodified
+//!
+//! # #[allow(unused_variables)]
+//! fn on_stack() {
+//!   let db = Database::new();
+//!   {
+//!     let table1 = Table::new(&db);
+//!     let table2 = Table::new(&db);
+//!     do_stuff(&table1);
+//!     // Etc
+//!   }
+//!   assert!(db.close());
+//! }
+//!
+//! // If we only wanted one Table and didn't care about ever getting the
+//! // Database back, we don't even need a reference.
+//! fn by_value() {
+//!   let db = Database::new();
+//!   let table = Table::new(db);
+//!   do_stuff(&table);
+//! }
+//!
+//! // And we can declare our holds-everything struct by using `Arc`s to deal
+//! // with ownership.
+//! struct Resources {
+//!   db: Arc<Database>,
+//!   table: Table<'static>,
+//! }
+//! impl Resources {
+//!   fn new() -> Self {
+//!     let db = Arc::new(Database::new());
+//!     let table = Table::new(Supercow::shared(db.clone()));
+//!     Resources { db: db, table: table }
+//!   }
+//!
+//!   fn close(self) -> bool {
+//!     drop(self.table);
+//!     Arc::try_unwrap(self.db).ok().unwrap().close()
+//!   }
+//! }
+//!
+//! fn with_struct() {
+//!   let res = Resources::new();
+//!   do_stuff(&res.table);
+//!   assert!(res.close());
+//! }
+//!
+//! # #[allow(unused_variables)]
+//! fn do_stuff(table: &Table) {
+//!   // Stuff
+//! }
+//!
+//! ```
+//!
+//! # Other Notes
+//!
+//! Using `Supercow` will not give your application `apt-get`-style Super Cow
+//! Powers.
+
 use std::borrow::{Borrow, ToOwned};
 use std::convert::{AsRef, From};
 use std::cmp;
