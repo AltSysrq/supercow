@@ -6,6 +6,7 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+use std::borrow::{Borrow, ToOwned};
 use std::convert::From;
 use std::cmp;
 use std::fmt;
@@ -16,6 +17,7 @@ use std::ops::Deref;
 /// Miscelaneous things used to integrate other code with Supercow, but which
 /// is not of interest to end users.
 pub mod aux {
+    use std::borrow::Borrow;
     use std::rc::Rc;
     use std::sync::Arc;
 
@@ -53,6 +55,51 @@ pub mod aux {
             (**self).const_deref()
         }
     }
+
+    /// Marker trait for `Borrow`s which always return the same reference, even
+    /// after mutation (including entirely replacing the value).
+    ///
+    /// This is needed by `Supercow::to_mut`.
+    ///
+    /// ## Unsafety
+    ///
+    /// Behaviour is undefined if `borrow()`, when passed the same reference at
+    /// different times, returns different references.
+    pub unsafe trait ConstBorrow<T : ?Sized>: Borrow<T> { }
+    unsafe impl<T : ?Sized> ConstBorrow<T> for T { }
+    unsafe impl<T> ConstBorrow<[T]> for [T;0] { }
+    unsafe impl<T> ConstBorrow<[T]> for [T;1] { }
+    unsafe impl<T> ConstBorrow<[T]> for [T;2] { }
+    unsafe impl<T> ConstBorrow<[T]> for [T;3] { }
+    unsafe impl<T> ConstBorrow<[T]> for [T;4] { }
+    unsafe impl<T> ConstBorrow<[T]> for [T;5] { }
+    unsafe impl<T> ConstBorrow<[T]> for [T;6] { }
+    unsafe impl<T> ConstBorrow<[T]> for [T;7] { }
+    unsafe impl<T> ConstBorrow<[T]> for [T;8] { }
+    unsafe impl<T> ConstBorrow<[T]> for [T;9] { }
+    unsafe impl<T> ConstBorrow<[T]> for [T;10] { }
+    unsafe impl<T> ConstBorrow<[T]> for [T;11] { }
+    unsafe impl<T> ConstBorrow<[T]> for [T;12] { }
+    unsafe impl<T> ConstBorrow<[T]> for [T;13] { }
+    unsafe impl<T> ConstBorrow<[T]> for [T;14] { }
+    unsafe impl<T> ConstBorrow<[T]> for [T;15] { }
+    unsafe impl<T> ConstBorrow<[T]> for [T;16] { }
+    unsafe impl<T> ConstBorrow<[T]> for [T;17] { }
+    unsafe impl<T> ConstBorrow<[T]> for [T;18] { }
+    unsafe impl<T> ConstBorrow<[T]> for [T;19] { }
+    unsafe impl<T> ConstBorrow<[T]> for [T;20] { }
+    unsafe impl<T> ConstBorrow<[T]> for [T;21] { }
+    unsafe impl<T> ConstBorrow<[T]> for [T;22] { }
+    unsafe impl<T> ConstBorrow<[T]> for [T;23] { }
+    unsafe impl<T> ConstBorrow<[T]> for [T;24] { }
+    unsafe impl<T> ConstBorrow<[T]> for [T;25] { }
+    unsafe impl<T> ConstBorrow<[T]> for [T;26] { }
+    unsafe impl<T> ConstBorrow<[T]> for [T;27] { }
+    unsafe impl<T> ConstBorrow<[T]> for [T;28] { }
+    unsafe impl<T> ConstBorrow<[T]> for [T;29] { }
+    unsafe impl<T> ConstBorrow<[T]> for [T;30] { }
+    unsafe impl<T> ConstBorrow<[T]> for [T;31] { }
+    unsafe impl<T> ConstBorrow<[T]> for [T;32] { }
 }
 
 use self::aux::*;
@@ -129,10 +176,10 @@ supercow_features!(
     /// The feature set used for `ASupercow` references.
     pub trait SyncFeatures: Clone, Send, Sync);
 
-pub struct Supercow<'a, OWNED,
-                    SPECIAL = Box<DefaultFeatures<'a, Target = OWNED>>>
-where OWNED : 'a,
-      SPECIAL : ConstDeref<Target = OWNED> {
+pub struct Supercow<'a, OWNED, BORROWED = OWNED,
+                    SPECIAL = Box<DefaultFeatures<'a, Target = BORROWED>>>
+where BORROWED : 'a,
+      SPECIAL : ConstDeref<Target = BORROWED> {
     // In order to implement `Deref` in a branch-free fashion that isn't
     // sensitive to the Supercow being moved, we set `ptr_mask` and
     // `ptr_displacement` such that
@@ -148,23 +195,23 @@ where OWNED : 'a,
     // future (since `SupercowData` has a decent amount of padding).
     ptr_displacement: usize,
     ptr_mask: i8,
-    state: SupercowData<'a, OWNED, SPECIAL>,
+    state: SupercowData<'a, OWNED, BORROWED, SPECIAL>,
 }
 
-enum SupercowData<'a, OWNED : 'a, SPECIAL> {
+enum SupercowData<'a, OWNED, BORROWED : 'a, SPECIAL> {
     Owned(OWNED),
-    Borrowed(&'a OWNED),
+    Borrowed(&'a BORROWED),
     Special(SPECIAL),
 }
 use self::SupercowData::*;
 
-impl<'a, OWNED, SPECIAL> Deref
-for Supercow<'a, OWNED, SPECIAL>
-where OWNED : 'a,
-      SPECIAL : ConstDeref<Target = OWNED> {
-    type Target = OWNED;
+impl<'a, OWNED, BORROWED, SPECIAL> Deref
+for Supercow<'a, OWNED, BORROWED, SPECIAL>
+where BORROWED : 'a,
+      SPECIAL : ConstDeref<Target = BORROWED> {
+    type Target = BORROWED;
     #[inline]
-    fn deref(&self) -> &OWNED {
+    fn deref(&self) -> &BORROWED {
         let mask = self.ptr_mask as isize as usize;
         unsafe {
             let self_address: usize = mem::transmute(self);
@@ -174,23 +221,24 @@ where OWNED : 'a,
     }
 }
 
-impl<'a, OWNED, SPECIAL>
-Supercow<'a, OWNED, SPECIAL>
-where OWNED : 'a,
-      SPECIAL : ConstDeref<Target = OWNED> {
+impl<'a, OWNED, BORROWED, SPECIAL>
+Supercow<'a, OWNED, BORROWED, SPECIAL>
+where OWNED : Borrow<BORROWED>,
+      BORROWED : 'a,
+      SPECIAL : ConstDeref<Target = BORROWED> {
     pub fn owned(inner: OWNED) -> Self {
         Self::from_data(Owned(inner))
     }
 
-    pub fn borrowed(inner: &'a OWNED) -> Self {
-        Self::from_data(Borrowed(inner))
+    pub fn borrowed<T : Borrow<BORROWED>>(inner: &'a T) -> Self {
+        Self::from_data(Borrowed(inner.borrow()))
     }
 
     pub fn special<T : Into<SPECIAL>>(inner: T) -> Self {
         Self::from_data(Special(inner.into()))
     }
 
-    fn from_data(data: SupercowData<'a, OWNED, SPECIAL>) -> Self {
+    fn from_data(data: SupercowData<'a, OWNED, BORROWED, SPECIAL>) -> Self {
         let mut this = Supercow {
             ptr_mask: 0,
             ptr_displacement: 0,
@@ -198,16 +246,16 @@ where OWNED : 'a,
         };
 
         let ptr = match this.state {
-            Owned(ref r) => r as *const OWNED,
-            Borrowed(r) => r as *const OWNED,
-            Special(ref s) => s.const_deref() as *const OWNED,
+            Owned(ref r) => r.borrow() as *const BORROWED,
+            Borrowed(r) => r as *const BORROWED,
+            Special(ref s) => s.const_deref() as *const BORROWED,
         };
         this.set_ptr(ptr);
 
         this
     }
 
-    fn set_ptr(&mut self, ptr: *const OWNED) {
+    fn set_ptr(&mut self, ptr: *const BORROWED) {
         // Use relative addressing if `ptr` is inside `self` and absolute
         // addressing otherwise.
         //
@@ -229,33 +277,36 @@ where OWNED : 'a,
     }
 }
 
-impl<'a, OWNED, SPECIAL> From<OWNED>
-for Supercow<'a, OWNED, SPECIAL>
-where OWNED : 'a,
-      SPECIAL : ConstDeref<Target = OWNED> {
+impl<'a, OWNED, BORROWED, SPECIAL> From<OWNED>
+for Supercow<'a, OWNED, BORROWED, SPECIAL>
+where OWNED : Borrow<BORROWED>,
+      BORROWED : 'a,
+      SPECIAL : ConstDeref<Target = BORROWED> {
     fn from(inner: OWNED) -> Self {
         Self::from_data(SupercowData::Owned(inner))
     }
 }
 
-impl<'a, OWNED, SPECIAL> From<&'a OWNED>
-for Supercow<'a, OWNED, SPECIAL>
-where OWNED : 'a,
-      SPECIAL : ConstDeref<Target = OWNED> {
+impl<'a, OWNED, BORROWED, SPECIAL> From<&'a OWNED>
+for Supercow<'a, OWNED, BORROWED, SPECIAL>
+where OWNED : Borrow<BORROWED>,
+      BORROWED : 'a,
+      SPECIAL : ConstDeref<Target = BORROWED> {
     fn from(inner: &'a OWNED) -> Self {
-        Self::from_data(SupercowData::Borrowed(inner))
+        Self::from_data(SupercowData::Borrowed(inner.borrow()))
     }
 }
 
-impl<'a, OWNED, SPECIAL>
-Supercow<'a, OWNED, SPECIAL>
-where OWNED : 'a + Clone,
-      SPECIAL : ConstDeref<Target = OWNED> {
+impl<'a, OWNED, BORROWED, SPECIAL>
+Supercow<'a, OWNED, BORROWED, SPECIAL>
+where OWNED : ConstBorrow<BORROWED>,
+      BORROWED : 'a + ToOwned<Owned = OWNED>,
+      SPECIAL : ConstDeref<Target = BORROWED> {
     pub fn to_mut(&mut self) -> &mut OWNED {
         let new = match self.state {
             Owned(ref mut r) => return r,
-            Borrowed(r) => Self::from(r.clone()),
-            Special(ref s) => Self::from(s.const_deref().clone()),
+            Borrowed(r) => Self::owned(r.to_owned()),
+            Special(ref s) => Self::owned(s.const_deref().to_owned()),
         };
         *self = new;
         match self.state {
@@ -265,10 +316,11 @@ where OWNED : 'a + Clone,
     }
 }
 
-impl<'a, OWNED, SPECIAL> Clone
-for Supercow<'a, OWNED, SPECIAL>
-where OWNED : Clone + 'a,
-      SPECIAL : Clone + ConstDeref<Target = OWNED> {
+impl<'a, OWNED, BORROWED, SPECIAL> Clone
+for Supercow<'a, OWNED, BORROWED, SPECIAL>
+where OWNED : Clone,
+      BORROWED : 'a,
+      SPECIAL : Clone + ConstDeref<Target = BORROWED> {
     fn clone(&self) -> Self {
         Supercow {
             ptr_mask: self.ptr_mask,
@@ -284,10 +336,10 @@ where OWNED : Clone + 'a,
 
 macro_rules! deleg_fmt {
     ($tr:ident) => {
-        impl<'a, OWNED, SPECIAL> fmt::$tr
-        for Supercow<'a, OWNED, SPECIAL>
-        where OWNED : fmt::$tr + 'a,
-              SPECIAL : ConstDeref<Target = OWNED> {
+        impl<'a, OWNED, BORROWED, SPECIAL> fmt::$tr
+        for Supercow<'a, OWNED, BORROWED, SPECIAL>
+        where BORROWED : fmt::$tr + 'a,
+              SPECIAL : ConstDeref<Target = BORROWED> {
             fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
                 (**self).fmt(f)
             }
@@ -304,11 +356,11 @@ deleg_fmt!(Pointer);
 deleg_fmt!(UpperExp);
 deleg_fmt!(UpperHex);
 
-impl<'a, OWNED, SPECIAL, T> cmp::PartialEq<T>
-for Supercow<'a, OWNED, SPECIAL>
-where T : Deref<Target = OWNED>,
-      OWNED : PartialEq<OWNED> + 'a,
-      SPECIAL : ConstDeref<Target = OWNED> {
+impl<'a, OWNED, BORROWED, SPECIAL, T> cmp::PartialEq<T>
+for Supercow<'a, OWNED, BORROWED, SPECIAL>
+where T : Deref<Target = BORROWED>,
+      BORROWED : PartialEq<BORROWED> + 'a,
+      SPECIAL : ConstDeref<Target = BORROWED> {
     fn eq(&self, other: &T) -> bool {
         **self == **other
     }
@@ -318,16 +370,16 @@ where T : Deref<Target = OWNED>,
     }
 }
 
-impl<'a, OWNED, SPECIAL> cmp::Eq
-for Supercow<'a, OWNED, SPECIAL>
-where OWNED : Eq + 'a,
-      SPECIAL : ConstDeref<Target = OWNED> { }
+impl<'a, OWNED, BORROWED, SPECIAL> cmp::Eq
+for Supercow<'a, OWNED, BORROWED, SPECIAL>
+where BORROWED : Eq + 'a,
+      SPECIAL : ConstDeref<Target = BORROWED> { }
 
-impl<'a, OWNED, SPECIAL, T> cmp::PartialOrd<T>
-for Supercow<'a, OWNED, SPECIAL>
-where T : Deref<Target = OWNED>,
-      OWNED : PartialOrd<OWNED> + 'a,
-      SPECIAL : ConstDeref<Target = OWNED> {
+impl<'a, OWNED, BORROWED, SPECIAL, T> cmp::PartialOrd<T>
+for Supercow<'a, OWNED, BORROWED, SPECIAL>
+where T : Deref<Target = BORROWED>,
+      BORROWED : PartialOrd<BORROWED> + 'a,
+      SPECIAL : ConstDeref<Target = BORROWED> {
     fn partial_cmp(&self, other: &T) -> Option<cmp::Ordering> {
         (**self).partial_cmp(other)
     }
@@ -349,19 +401,19 @@ where T : Deref<Target = OWNED>,
     }
 }
 
-impl<'a, OWNED, SPECIAL> cmp::Ord
-for Supercow<'a, OWNED, SPECIAL>
-where OWNED : cmp::Ord + 'a,
-      SPECIAL : ConstDeref<Target = OWNED> {
+impl<'a, OWNED, BORROWED, SPECIAL> cmp::Ord
+for Supercow<'a, OWNED, BORROWED, SPECIAL>
+where BORROWED : cmp::Ord + 'a,
+      SPECIAL : ConstDeref<Target = BORROWED> {
     fn cmp(&self, other: &Self) -> cmp::Ordering {
         (**self).cmp(other)
     }
 }
 
-impl<'a, OWNED, SPECIAL> Hash
-for Supercow<'a, OWNED, SPECIAL>
-where OWNED : Hash + 'a,
-      SPECIAL : ConstDeref<Target = OWNED> {
+impl<'a, OWNED, BORROWED, SPECIAL> Hash
+for Supercow<'a, OWNED, BORROWED, SPECIAL>
+where BORROWED : Hash + 'a,
+      SPECIAL : ConstDeref<Target = BORROWED> {
     fn hash<H : Hasher>(&self, h: &mut H) {
         (**self).hash(h)
     }
