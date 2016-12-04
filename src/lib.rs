@@ -136,15 +136,18 @@ where OWNED : 'a,
     // In order to implement `Deref` in a branch-free fashion that isn't
     // sensitive to the Supercow being moved, we set `ptr_mask` and
     // `ptr_displacement` such that
-    // `target = &*((&self & ptr_mask) + ptr_displacement)`
+    // `target = &*((&self & sext(ptr_mask)) + ptr_displacement)`
     // (arithmetic in terms of bytes, obviously).
     //
     // So for the three cases:
     //
     // Owned => ptr_mask = ~0u, ptr_displacement = offsetof(self, Owned.0)
     // Borrowed, Special => ptr_mask = 0u, ptr_displacement = address
-    ptr_mask: usize,
+    //
+    // `ptr_mask` is an i8 since that may allow better struct layout in the
+    // future (since `SupercowData` has a decent amount of padding).
     ptr_displacement: usize,
+    ptr_mask: i8,
     state: SupercowData<'a, OWNED, SPECIAL>,
 }
 
@@ -162,9 +165,10 @@ where OWNED : 'a,
     type Target = OWNED;
     #[inline]
     fn deref(&self) -> &OWNED {
+        let mask = self.ptr_mask as isize as usize;
         unsafe {
             let self_address: usize = mem::transmute(self);
-            mem::transmute((self_address & self.ptr_mask) +
+            mem::transmute((self_address & mask) +
                            self.ptr_displacement)
         }
     }
