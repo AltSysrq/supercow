@@ -16,7 +16,7 @@ use std::ops::{Deref, DerefMut};
 use std::slice;
 
 /// Miscelaneous things used to integrate other code with Supercow, but which
-/// is not of interest to end users.
+/// are not of interest to end users.
 pub mod aux {
     use std::borrow::Borrow;
     use std::ffi::{CStr, OsStr};
