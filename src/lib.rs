@@ -218,15 +218,12 @@ where BORROWED : 'a,
     // Owned => ptr_mask = ~0u, ptr_displacement = offsetof(self, Owned.0)
     // Borrowed, Special => ptr_mask = 0u, ptr_displacement = address
     //
-    // `ptr_mask` is an i8 since that may allow better struct layout in the
-    // future (since `SupercowData` has a decent amount of padding).
-    //
     // In order to support DSTs, `ptr_displacement` is actually a reference to
     // `BORROWED`. We assume the first pointer-sized value is the actual
     // pointer (see `PointerFirstRef`). `ptr_displacement` may not actually be
     // dereferenced.
     ptr_displacement: &'a BORROWED,
-    ptr_mask: i8,
+    ptr_mask: usize,
     state: SupercowData<'a, OWNED, BORROWED, SPECIAL>,
 }
 
@@ -245,14 +242,13 @@ where BORROWED : 'a,
     type Target = BORROWED;
     #[inline]
     fn deref(&self) -> &BORROWED {
-        let mask = self.ptr_mask as isize as usize;
         let self_address = self as *const Self as usize;
 
         let mut target_ref = self.ptr_displacement;
         unsafe {
             let target_address: &mut usize = mem::transmute(&mut target_ref);
             let nominal_address = *target_address;
-            *target_address = (self_address & mask) + nominal_address;
+            *target_address = (self_address & self.ptr_mask) + nominal_address;
         }
         target_ref
     }
