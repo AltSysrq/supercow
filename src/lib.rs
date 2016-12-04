@@ -12,14 +12,17 @@ use std::cmp;
 use std::fmt;
 use std::mem;
 use std::hash::{Hash, Hasher};
-use std::ops::Deref;
+use std::ops::{Deref, DerefMut};
 use std::slice;
 
 /// Miscelaneous things used to integrate other code with Supercow, but which
 /// is not of interest to end users.
 pub mod aux {
     use std::borrow::Borrow;
+    use std::ffi::{CStr, OsStr};
+    use std::path::Path;
     use std::rc::Rc;
+    use std::slice;
     use std::sync::Arc;
 
     /// Marker trait indicating a `Deref`-like which always returns the same
@@ -57,50 +60,58 @@ pub mod aux {
         }
     }
 
-    /// Marker trait for `Borrow`s which always return the same reference, even
-    /// after mutation (including entirely replacing the value).
-    ///
-    /// This is needed by `Supercow::to_mut`.
-    ///
-    /// ## Unsafety
-    ///
-    /// Behaviour is undefined if `borrow()`, when passed the same reference at
-    /// different times, returns different references.
-    pub unsafe trait ConstBorrow<T : ?Sized>: Borrow<T> { }
-    unsafe impl<T : ?Sized> ConstBorrow<T> for T { }
-    unsafe impl<T> ConstBorrow<[T]> for [T;0] { }
-    unsafe impl<T> ConstBorrow<[T]> for [T;1] { }
-    unsafe impl<T> ConstBorrow<[T]> for [T;2] { }
-    unsafe impl<T> ConstBorrow<[T]> for [T;3] { }
-    unsafe impl<T> ConstBorrow<[T]> for [T;4] { }
-    unsafe impl<T> ConstBorrow<[T]> for [T;5] { }
-    unsafe impl<T> ConstBorrow<[T]> for [T;6] { }
-    unsafe impl<T> ConstBorrow<[T]> for [T;7] { }
-    unsafe impl<T> ConstBorrow<[T]> for [T;8] { }
-    unsafe impl<T> ConstBorrow<[T]> for [T;9] { }
-    unsafe impl<T> ConstBorrow<[T]> for [T;10] { }
-    unsafe impl<T> ConstBorrow<[T]> for [T;11] { }
-    unsafe impl<T> ConstBorrow<[T]> for [T;12] { }
-    unsafe impl<T> ConstBorrow<[T]> for [T;13] { }
-    unsafe impl<T> ConstBorrow<[T]> for [T;14] { }
-    unsafe impl<T> ConstBorrow<[T]> for [T;15] { }
-    unsafe impl<T> ConstBorrow<[T]> for [T;16] { }
-    unsafe impl<T> ConstBorrow<[T]> for [T;17] { }
-    unsafe impl<T> ConstBorrow<[T]> for [T;18] { }
-    unsafe impl<T> ConstBorrow<[T]> for [T;19] { }
-    unsafe impl<T> ConstBorrow<[T]> for [T;20] { }
-    unsafe impl<T> ConstBorrow<[T]> for [T;21] { }
-    unsafe impl<T> ConstBorrow<[T]> for [T;22] { }
-    unsafe impl<T> ConstBorrow<[T]> for [T;23] { }
-    unsafe impl<T> ConstBorrow<[T]> for [T;24] { }
-    unsafe impl<T> ConstBorrow<[T]> for [T;25] { }
-    unsafe impl<T> ConstBorrow<[T]> for [T;26] { }
-    unsafe impl<T> ConstBorrow<[T]> for [T;27] { }
-    unsafe impl<T> ConstBorrow<[T]> for [T;28] { }
-    unsafe impl<T> ConstBorrow<[T]> for [T;29] { }
-    unsafe impl<T> ConstBorrow<[T]> for [T;30] { }
-    unsafe impl<T> ConstBorrow<[T]> for [T;31] { }
-    unsafe impl<T> ConstBorrow<[T]> for [T;32] { }
+    /// Extension of `Borrow` used to allow `Supercow::to_mut()` to work
+    /// safely.
+    pub unsafe trait SafeBorrow<T : ?Sized>: Borrow<T> {
+        /// Given `ptr`, which was obtained from a prior call to
+        /// `Self::borrow()`, return a value with the same nominal lifetime
+        /// which is guaranteed to survive mutations to `Self`.
+        ///
+        /// Types which implement `Borrow` by pure, constant pointer arithmetic
+        /// on `self` can simply return `ptr` unmodified. Other types typically
+        /// need to provide some static reference, such as the empty string for
+        /// `&str`.
+        ///
+        /// ## Unsafety
+        ///
+        /// Behaviour is undefined if this call returns `ptr`, but a mutation
+        /// to `Self` could invalidate the reference.
+        fn borrow_replacement<'a>(ptr: &'a T) -> &'a T;
+    }
+    unsafe impl<T : ?Sized> SafeBorrow<T> for T {
+        fn borrow_replacement(ptr: &T) -> &T { ptr }
+    }
+    unsafe impl<B, T> SafeBorrow<[B]> for T where T : Borrow<[B]> {
+        fn borrow_replacement(_: &[B]) -> &[B] {
+            unsafe {
+                slice::from_raw_parts(1 as usize as *const B, 0)
+            }
+        }
+    }
+    unsafe impl<T> SafeBorrow<str> for T where T : Borrow<str> {
+        fn borrow_replacement(_: &str) -> &str { "" }
+    }
+    unsafe impl<T> SafeBorrow<CStr> for T
+    where T : Borrow<CStr> {
+        fn borrow_replacement(_: &CStr) -> &CStr {
+            static EMPTY_CSTR: &'static [u8] = &[0];
+            unsafe {
+                CStr::from_bytes_with_nul_unchecked(EMPTY_CSTR)
+            }
+        }
+    }
+    unsafe impl<T> SafeBorrow<OsStr> for T
+    where T : Borrow<OsStr> {
+        fn borrow_replacement(_: &OsStr) -> &OsStr {
+            OsStr::new("")
+        }
+    }
+    unsafe impl<T> SafeBorrow<Path> for T
+    where T : Borrow<Path> {
+        fn borrow_replacement(_: &Path) -> &Path {
+            Path::new("")
+        }
+    }
 
     /// Marker trait identifying a reference type which begins with an absolute
     /// address and contains no other address-dependent information.
@@ -178,7 +189,7 @@ macro_rules! supercow_features {
                 Box::new(cloned)
             }
         }
-        impl<'a, S : 'a> Clone for Box<$feature_name<'a, Target = S> + 'a> {
+        impl<'a, S : 'a + ?Sized> Clone for Box<$feature_name<'a, Target = S> + 'a> {
             fn clone(&self) -> Self {
                 $feature_name::clone_boxed(&**self)
             }
@@ -189,7 +200,7 @@ macro_rules! supercow_features {
         $(#[$meta])*
         pub trait $feature_name<'a>: $($req +)* $crate::aux::ConstDeref + 'a {
         }
-        impl<'a, T : 'a + $($req +)* Clone + $crate::aux::ConstDeref>
+        impl<'a, T : 'a + $($req +)* $crate::aux::ConstDeref>
         $feature_name<'a> for T {
         }
     };
@@ -203,7 +214,7 @@ supercow_features!(
     pub trait SyncFeatures: Clone, Send, Sync);
 
 pub struct Supercow<'a, OWNED, BORROWED : ?Sized = OWNED,
-                    SPECIAL = Box<DefaultFeatures<'a, Target = BORROWED>>>
+                    SPECIAL = Box<DefaultFeatures<'a, Target = BORROWED> + 'a>>
 where BORROWED : 'a,
       &'a BORROWED : PointerFirstRef,
       SPECIAL : ConstDeref<Target = BORROWED> {
@@ -303,7 +314,10 @@ where OWNED : Borrow<BORROWED>,
                 dst.copy_from_slice(src);
             }
         }
+        self.adjust_ptr();
+    }
 
+    fn adjust_ptr(&mut self) {
         // Use relative addressing if `ptr` is inside `self` and absolute
         // addressing otherwise.
         //
@@ -350,21 +364,86 @@ where OWNED : Borrow<BORROWED>,
 
 impl<'a, OWNED, BORROWED : ?Sized, SPECIAL>
 Supercow<'a, OWNED, BORROWED, SPECIAL>
-where OWNED : ConstBorrow<BORROWED>,
+where OWNED : SafeBorrow<BORROWED>,
       BORROWED : 'a + ToOwned<Owned = OWNED>,
       &'a BORROWED : PointerFirstRef,
       SPECIAL : ConstDeref<Target = BORROWED> {
-    pub fn to_mut(&mut self) -> &mut OWNED {
+    pub fn to_mut<'b>(&'b mut self) -> Ref<'a, 'b, OWNED, BORROWED, SPECIAL> {
+        // Take ownership if we do not already have it
         let new = match self.state {
-            Owned(ref mut r) => return r,
-            Borrowed(r) => Self::owned(r.to_owned()),
-            Special(ref s) => Self::owned(s.const_deref().to_owned()),
+            Owned(_) => None,
+            Borrowed(r) => Some(Self::owned(r.to_owned())),
+            Special(ref s) => Some(Self::owned(s.const_deref().to_owned())),
         };
-        *self = new;
-        match self.state {
-            Owned(ref mut r) => r,
-            _ => unreachable!(),
+        if let Some(new) = new {
+            *self = new;
         }
+
+        let r = match self.state {
+            Owned(ref mut r) => r as *mut OWNED,
+            _ => unreachable!(),
+        };
+        // Because mutating the owned value could invalidate the calculated
+        // pointer we have, reset it to something that won't change, and then
+        // recalculate it when the `Ref` is dropped.
+        self.ptr_displacement =
+            OWNED::borrow_replacement(self.ptr_displacement);
+        self.adjust_ptr();
+
+        Ref { r: r, parent: self }
+    }
+}
+
+pub struct Ref<'a, 'b, OWNED, BORROWED : ?Sized, SPECIAL>
+where 'a: 'b,
+      OWNED : 'b + SafeBorrow<BORROWED>,
+      BORROWED : 'a,
+      &'a BORROWED : PointerFirstRef,
+      SPECIAL : 'b + ConstDeref<Target = BORROWED> {
+    r: *mut OWNED,
+    parent: &'b mut Supercow<'a, OWNED, BORROWED, SPECIAL>,
+}
+
+impl<'a, 'b, OWNED, BORROWED : ?Sized, SPECIAL> Deref
+for Ref<'a, 'b, OWNED, BORROWED, SPECIAL>
+where 'a: 'b,
+      OWNED : 'b + SafeBorrow<BORROWED>,
+      BORROWED : 'a,
+      &'a BORROWED : PointerFirstRef,
+      SPECIAL : 'b + ConstDeref<Target = BORROWED> {
+    type Target = OWNED;
+
+    #[inline]
+    fn deref(&self) -> &OWNED {
+        unsafe { &*self.r }
+    }
+}
+
+impl<'a, 'b, OWNED, BORROWED : ?Sized, SPECIAL> DerefMut
+for Ref<'a, 'b, OWNED, BORROWED, SPECIAL>
+where 'a: 'b,
+      OWNED : 'b + SafeBorrow<BORROWED>,
+      BORROWED : 'a,
+      &'a BORROWED : PointerFirstRef,
+      SPECIAL : 'b + ConstDeref<Target = BORROWED> {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut OWNED {
+        unsafe { &mut*self.r }
+    }
+}
+
+impl<'a, 'b, OWNED, BORROWED : ?Sized, SPECIAL> Drop
+for Ref<'a, 'b, OWNED, BORROWED, SPECIAL>
+where 'a: 'b,
+      OWNED : 'b + SafeBorrow<BORROWED>,
+      BORROWED : 'a,
+      &'a BORROWED : PointerFirstRef,
+      SPECIAL : 'b + ConstDeref<Target = BORROWED> {
+    #[inline]
+    fn drop(&mut self) {
+        // The value of `OWNED::borrow()` may have changed, so recompute
+        // everything instead of backing the old values up.
+        self.parent.set_ptr()
     }
 }
 
@@ -508,5 +587,10 @@ mod test {
         let a: Supercow<String, str> = Supercow::borrowed("hello");
         let b: Supercow<String, str> = Supercow::owned("hello".to_owned());
         assert_eq!(a, b);
+
+        let mut c = a.clone();
+        c.to_mut().push_str(" world");
+        assert_eq!(a, b);
+        assert_eq!(c, "hello world");
     }
 }
