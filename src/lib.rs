@@ -62,11 +62,18 @@ use self::aux::*;
 /// ## Syntax
 ///
 /// ```
+/// #[macro_use] extern crate supercow;
+///
+/// # pub trait SomeTrait { }
+/// # pub trait AnotherTrait { }
+///
 /// supercow_features!(
 ///   /// Some documentation, etc, if desired.
-///   pub trait FeatureName: SomeTrait, SomeTrait);
+///   pub trait FeatureName: SomeTrait, AnotherTrait);
 /// supercow_features!(
-///   pub trait FeatureName: Clone, SomeTrait, SomeTrait);
+///   pub trait FeatureName2: Clone, SomeTrait, AnotherTrait);
+///
+/// # fn main() { }
 /// ```
 ///
 /// ## Semantics
@@ -100,7 +107,7 @@ macro_rules! supercow_features {
         }
         impl<'a, S : 'a> Clone for Box<$feature_name<'a, Target = S> + 'a> {
             fn clone(&self) -> Self {
-                $feature_name::clone_boxed(self)
+                $feature_name::clone_boxed(&**self)
             }
         }
     };
@@ -356,6 +363,28 @@ where OWNED : Hash + 'a,
     }
 }
 
-fn doit() {
-    let _x: Supercow<'static, u32> = Supercow::owned(42u32);
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn ref_to_owned() {
+        let x = 42u32;
+        let a: Supercow<u32> = Supercow::borrowed(&x);
+        assert_eq!(x, *a);
+        assert_eq!(&x as *const u32 as usize,
+                   (&*a) as *const u32 as usize);
+
+        let mut b = a.clone();
+        assert_eq!(x, *b);
+        assert_eq!(&x as *const u32 as usize,
+                   (&*b) as *const u32 as usize);
+
+        *b.to_mut() = 56;
+        assert_eq!(42, *a);
+        assert_eq!(x, *a);
+        assert_eq!(&x as *const u32 as usize,
+                   (&*a) as *const u32 as usize);
+        assert_eq!(56, *b);
+    }
 }
