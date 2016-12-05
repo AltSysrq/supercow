@@ -116,7 +116,7 @@
 //!   assert_eq!(42, *some_api_function(21));
 //!   let twenty_one = 21;
 //!   assert_eq!(42, *some_api_function(&twenty_one));
-//!   assert_eq!(42, *some_api_function(Supercow::shared(Arc::new(21))));
+//!   assert_eq!(42, *some_api_function(Arc::new(21)));
 //! }
 //! ```
 //!
@@ -330,7 +330,7 @@
 //! impl Resources {
 //!   fn new() -> Self {
 //!     let db = Arc::new(Database::new());
-//!     let table = Table::new(Supercow::shared(db.clone()));
+//!     let table = Table::new(db.clone());
 //!     Resources { db: db, table: table }
 //!   }
 //!
@@ -384,6 +384,26 @@
 //!
 //! Note that you may need to provide an identity `supercow::aux::SharedFrom`
 //! implementation if you have a custom reference type.
+//!
+//! # Conversions
+//!
+//! To facilitate client API designs, `Supercow` converts (via `From`/`Into`)
+//! from a number of things. Unfortunately, due to trait coherence rules, this
+//! does not yet apply in all cases where one might hope. The currently
+//! available conversions are:
+//!
+//! - The `OWNED` type into an owned `Supercow`. This applies without
+//! restriction.
+//!
+//! - A reference to the `OWNED` type. References to a different `BORROWED`
+//! type are currently not convertable; `Supercow::borrowed()` will be needed
+//! to construct the `Supercow` explicitly.
+//!
+//! - `Rc<OWNED>` and `Arc<OWNED>` for `Supercow`s where `OWNED` and `BORROWED`
+//! are the exact same type, and where the `Rc` or `Arc` can be converted into
+//! `SHARED` via `supercow::aux::SharedFrom`. If `OWNED` and `BORROWED` are
+//! different types, `Supercow::shared()` will be needed to construct the
+//! `Supercow` explicitly.
 //!
 //! # Advanced
 //!
@@ -600,7 +620,9 @@ use std::fmt;
 use std::mem;
 use std::hash::{Hash, Hasher};
 use std::ops::{Deref, DerefMut};
+use std::rc::Rc;
 use std::slice;
+use std::sync::Arc;
 
 /// Miscelaneous things used to integrate other code with Supercow, but which
 /// are not of interest to end users.
@@ -1010,6 +1032,12 @@ where OWNED : Borrow<BORROWED>,
     }
 }
 
+// For now, we can't accept `&BORROWED` because it's theoretically possible for
+// someone to make `<BORROWED as ToOwned>::Owned = &BORROWED`, in which case
+// the `OWNED` version above would apply.
+//
+// Maybe once specialisation lands in stable, we can make `From` do what we
+// want everywhere.
 impl<'a, OWNED, BORROWED : ?Sized, SHARED> From<&'a OWNED>
 for Supercow<'a, OWNED, BORROWED, SHARED>
 where OWNED : Borrow<BORROWED>,
@@ -1018,6 +1046,32 @@ where OWNED : Borrow<BORROWED>,
       SHARED : ConstDeref<Target = BORROWED> {
     fn from(inner: &'a OWNED) -> Self {
         Self::from_data(SupercowData::Borrowed(inner.borrow()))
+    }
+}
+
+// Similarly, we can't support arbitrary types here, and need to require
+// `BORROWED == OWNED` for `Rc` and `Arc`. Ideally, we'd support anything that
+// coerces into `SHARED`. Again, maybe one day after specialisation..
+impl<'a, OWNED, SHARED> From<Rc<OWNED>>
+for Supercow<'a, OWNED, OWNED, SHARED>
+where OWNED : 'a,
+      &'a OWNED : PointerFirstRef,
+      SHARED : ConstDeref<Target = OWNED>,
+      SHARED : SharedFrom<Rc<OWNED>> {
+    fn from(rc: Rc<OWNED>) -> Self {
+        Self::from_data(SupercowData::Shared(
+            SHARED::shared_from(rc)))
+    }
+}
+impl<'a, OWNED, SHARED> From<Arc<OWNED>>
+for Supercow<'a, OWNED, OWNED, SHARED>
+where OWNED : 'a,
+      &'a OWNED : PointerFirstRef,
+      SHARED : ConstDeref<Target = OWNED>,
+      SHARED : SharedFrom<Arc<OWNED>> {
+    fn from(rc: Arc<OWNED>) -> Self {
+        Self::from_data(SupercowData::Shared(
+            SHARED::shared_from(rc)))
     }
 }
 
