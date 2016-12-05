@@ -1229,16 +1229,16 @@ deleg_fmt!(UpperHex);
 
 impl<'a, OWNED, BORROWED : ?Sized, SHARED, T> cmp::PartialEq<T>
 for Supercow<'a, OWNED, BORROWED, SHARED>
-where T : Deref<Target = BORROWED>,
+where T : Borrow<BORROWED>,
       BORROWED : 'a + PartialEq<BORROWED>,
       &'a BORROWED : PointerFirstRef,
       SHARED : ConstDeref<Target = BORROWED> {
     fn eq(&self, other: &T) -> bool {
-        **self == **other
+        **self == *other.borrow()
     }
 
     fn ne(&self, other: &T) -> bool {
-        **self != **other
+        **self != *other.borrow()
     }
 }
 
@@ -1250,28 +1250,28 @@ where BORROWED : 'a + Eq,
 
 impl<'a, OWNED, BORROWED : ?Sized, SHARED, T> cmp::PartialOrd<T>
 for Supercow<'a, OWNED, BORROWED, SHARED>
-where T : Deref<Target = BORROWED>,
+where T : Borrow<BORROWED>,
       BORROWED : 'a + PartialOrd<BORROWED>,
       &'a BORROWED : PointerFirstRef,
       SHARED : ConstDeref<Target = BORROWED> {
     fn partial_cmp(&self, other: &T) -> Option<cmp::Ordering> {
-        (**self).partial_cmp(other)
+        (**self).partial_cmp(other.borrow())
     }
 
     fn lt(&self, other: &T) -> bool {
-        **self < **other
+        **self < *other.borrow()
     }
 
     fn le(&self, other: &T) -> bool {
-        **self <= **other
+        **self <= *other.borrow()
     }
 
     fn gt(&self, other: &T) -> bool {
-        **self > **other
+        **self > *other.borrow()
     }
 
     fn ge(&self, other: &T) -> bool {
-        **self >= **other
+        **self >= *other.borrow()
     }
 }
 
@@ -1359,6 +1359,68 @@ mod test {
     fn default_accepts_arc() {
         let x: Supercow<u32> = Supercow::shared(Arc::new(42u32));
         assert_eq!(42, *x);
+    }
+
+    #[test]
+    fn ref_safe_even_if_forgotten() {
+        let mut x: Supercow<String, str> = Supercow::owned("foo".to_owned());
+        {
+            let mut m = x.to_mut();
+            // Add a bunch of characters to invalidate the allocation
+            for _ in 0..65536 {
+                m.push('x');
+            }
+
+            // Prevent the dtor from running but allow us to release the borrow
+            ::std::mem::forget(m);
+        }
+
+        // While the value has been corrupted, we have been left with a *safe*
+        // deref result nonetheless.
+        assert_eq!("", &*x);
+        // The actual String has not been lost so no memory has been leaked
+        assert_eq!(65539, x.to_mut().len());
+    }
+
+    #[test]
+    fn general_trait_delegs_work() {
+        use std::borrow::Borrow;
+        use std::collections::hash_map::DefaultHasher;
+        use std::convert::AsRef;
+        use std::cmp::*;
+        use std::hash::*;
+
+        macro_rules! test_fmt {
+            ($fmt:expr, $x:expr) => {
+                assert_eq!(format!($fmt, 42u32), format!($fmt, $x));
+            }
+        }
+
+        let x: Supercow<u32> = Supercow::owned(42u32);
+        test_fmt!("{}", x);
+        test_fmt!("{:?}", x);
+        test_fmt!("{:o}", x);
+        test_fmt!("{:x}", x);
+        test_fmt!("{:X}", x);
+        test_fmt!("{:b}", x);
+
+        assert!(x == 42);
+        assert!(x != 43);
+        assert!(x < 43);
+        assert!(x <= 43);
+        assert!(x > 41);
+        assert!(x >= 41);
+        assert_eq!(42.partial_cmp(&43), x.partial_cmp(&43));
+        assert_eq!(42.cmp(&43), x.cmp(&Supercow::owned(43)));
+
+        let mut expected_hash = DefaultHasher::new();
+        42u32.hash(&mut expected_hash);
+        let mut actual_hash = DefaultHasher::new();
+        x.hash(&mut actual_hash);
+        assert_eq!(expected_hash.finish(), actual_hash.finish());
+
+        assert_eq!(42u32, *x.borrow());
+        assert_eq!(42u32, *x.as_ref());
     }
 
     // This is where the asm in the Performance Notes section comes from.
