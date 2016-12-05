@@ -423,6 +423,143 @@
 //! }
 //! ```
 //!
+//! # Performance Considerations
+//!
+//! ## Construction Cost
+//!
+//! Since it inherently moves certain decisions about ownership from
+//! compile-time to run-time, `Supercow` is obviously not as fast as using an
+//! owned value directly or a reference directly.
+//!
+//! Constructing a `Supercow` with an owned object or a simple reference is
+//! reasonably fast, but does incur a small amount of overhead for the pointer
+//! displacement to be set up.
+//!
+//! The default `Supercow` shared reference type boxes the reference, incurring
+//! an allocation as well as virtual dispatch on certain operations. This is
+//! obviously much more expensive than the other options, though note that the
+//! allocation is only incurred when constructing the `Supercow`, so this is
+//! inconsequential in a create-once-use-many case. Use of a concrete shared
+//! reference type alleviates this issue.
+//!
+//! ## Destruction Cost
+//!
+//! Destroying a `Supercow` is roughly the same proportional cost of creating
+//! it.
+//!
+//! ## `Deref` Cost
+//!
+//! `Supercow`'s `deref` implementation is branch-free and therefore generally
+//! runs reasonably quickly. It is not dependent on the ownership mode of the
+//! `Supercow`, and so is not affected by the shared reference type, most
+//! importantly, making no virtual function calls even under the default boxed
+//! shared reference type. However, the way it works may prevent LLVM
+//! optimisations from applying in particular circumstances.
+//!
+//! For those wanting specifics, the function
+//!
+//! ```ignore
+//! // Substitute Cow with Supercow for the other case.
+//! // This takes references so that the destructor code is not intermingled.
+//! fn add_two(a: &Cow<u32>, b: &Cow<u32>) -> u32 {
+//!   **a + **b
+//! }
+//! ```
+//!
+//! results in the following on AMD64 with Rust 1.13.0:
+//!
+//! ```text
+//!  Cow                                Supercow
+//!  cmp    DWORD PTR [rdi],0x1         mov    rcx,QWORD PTR [rdi]
+//!  lea    rcx,[rdi+0x4]               and    rdi,QWORD PTR [rdi+0x8]
+//!  cmovne rcx,QWORD PTR [rdi+0x8]     mov    rax,QWORD PTR [rsi]
+//!  cmp    DWORD PTR [rsi],0x1         and    rsi,QWORD PTR [rsi+0x8]
+//!  lea    rax,[rsi+0x4]               mov    eax,DWORD PTR [rsi+rax]
+//!  cmovne rax,QWORD PTR [rsi+0x8]     add    eax,DWORD PTR [rdi+rcx]
+//!  mov    eax,DWORD PTR [rax]         ret
+//!  add    eax,DWORD PTR [rcx]
+//!  ret
+//! ```
+//!
+//! ## `to_mut` Cost
+//!
+//! Obtaining a `Ref` is substantially more expensive than `Deref`, as it must
+//! inspect the ownership mode of the `Supercow` and possibly move it into the
+//! owned mode. This will include a virtual call to the boxed shared reference
+//! if in shared mode when using the default `Supercow` shared reference type.
+//!
+//! There is also cost in releasing the mutable reference, though
+//! insubstantial in comparison.
+//!
+//! ## Memory Usage
+//!
+//! `Supercow` can be quite large in comparison to a bare reference. This
+//! stems from two sources:
+//!
+//! - There are two pointers of overhead (or three for DSTs) used for the
+//! branch-free `Deref` implementation.
+//!
+//! - The `Supercow` must be able to contain a full instance of `OWNED`.
+//!
+//! The second can be addressed in a couple ways. Firstly, you can make the
+//! `OWNED` type a `Box`. If you need something that depends on `ToOwned`, it
+//! may be necessary to wrap the owned value in a non-`Clone` struct that
+//! implements `ToOwned` by boxing itself.
+//!
+//! ```
+//! use supercow::Supercow;
+//!
+//! const N: usize = 65536;
+//! fn nth(array: &Supercow<Box<[u64;N]>, [u64;N]>, n: usize) -> u64 {
+//!   array[n]
+//! }
+//! fn main() {
+//!   let array: [u64;N] = [0;N];
+//!   let boxed_array: Box<[u64;N]> = Box::new([0;N]);
+//!   assert_eq!(0, nth(&Supercow::borrowed(&array), 42));
+//!   assert_eq!(0, nth(&Supercow::owned(boxed_array), 56));
+//! }
+//! ```
+//!
+//! If the owned (or shared) states are certainly never used, another option is
+//! to use an uninhabited type (possibly `!` depending on its state when it
+//! becomes stable). Because there is currently no way to provide a blanket
+//! implementation of `Borrow<T>` for all `T`, and there will never be a way to
+//! blanket `ConstDeref` in this way, `supercow` does not provide such a type
+//! at this time, but you can easily define your own.
+//!
+//! ```
+//! use std::borrow::Borrow;
+//! use std::sync::Arc;
+//!
+//! use supercow::Supercow;
+//!
+//! enum Void { }
+//! impl Borrow<u32> for Void {
+//!   fn borrow(&self) -> &u32 {
+//!     match *self { }
+//!   }
+//! }
+//! unsafe impl supercow::aux::SafeBorrow<u32> for Void {
+//!   fn borrow_replacement(ptr: &u32) -> &u32 { ptr }
+//! }
+//! unsafe impl supercow::aux::ConstDeref for Void {
+//!   type Target = u32;
+//!   fn const_deref(&self) -> &u32 {
+//!     match *self { }
+//!   }
+//! }
+//!
+//! fn never_owned(s: &Supercow<Void, u32>) -> u32 { **s }
+//! fn never_shared(s: &Supercow<u32, u32, Void>) -> u32 { **s }
+//!
+//! fn main() {
+//!   never_owned(&Supercow::shared(Arc::new(42)));
+//!   never_shared(&Supercow::owned(56));
+//! }
+//!
+//! ```
+//!
 //! # Other Notes
 //!
 //! Using `Supercow` will not give your application `apt-get`-style Super Cow
@@ -1127,6 +1264,7 @@ where BORROWED : 'a,
 
 #[cfg(test)]
 mod test {
+    use std::borrow::Cow;
     use std::sync::Arc;
 
     use super::*;
@@ -1168,5 +1306,27 @@ mod test {
     fn default_accepts_arc() {
         let x: Supercow<u32> = Supercow::shared(Arc::new(42u32));
         assert_eq!(42, *x);
+    }
+
+    // This is where the asm in the Performance Notes section comes from.
+
+    #[inline(never)]
+    fn add_two_cow(a: &Cow<u32>, b: &Cow<u32>) -> u32 {
+        **a + **b
+    }
+
+    #[inline(never)]
+    fn add_two_supercow(a: &Supercow<u32>, b: &Supercow<u32>) -> u32 {
+        **a + **b
+    }
+
+    #[test]
+    fn do_add_two() {
+        // Need to call `add_two_cow` twice to prevent LLVM from specialising
+        // it.
+        assert_eq!(42, add_two_cow(&Cow::Owned(40), &Cow::Owned(2)));
+        assert_eq!(44, add_two_cow(&Cow::Borrowed(&38), &Cow::Borrowed(&6)));
+        assert_eq!(42, add_two_supercow(&Supercow::owned(40),
+                                        &Supercow::owned(2)));
     }
 }
