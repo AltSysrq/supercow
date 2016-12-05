@@ -1029,8 +1029,32 @@ where OWNED : Borrow<BORROWED>,
       SHARED : ConstDeref<Target = BORROWED> {
     /// Takes ownership of the underlying value, so that this `Supercow` has a
     /// `'static` lifetime.
-    pub fn take_ownership(this: Self)
-                          -> Supercow<'static, OWNED, BORROWED, SHARED> {
+    ///
+    /// This may also change the `SHARED` type parameter arbitrarily (which
+    /// happens, eg, when converting from `Supercow<'a,u32>` to
+    /// `Supercow<'static,u32>`).
+    ///
+    /// ## Example
+    ///
+    /// ```
+    /// use supercow::Supercow;
+    ///
+    /// let s = {
+    ///   let fourty_two = 42u32;
+    ///   let by_ref: Supercow<u32> = Supercow::borrowed(&fourty_two);
+    ///   // We can't return `by_ref` because it holds a reference to
+    ///   // `fourty_two`. However, we can change that lifetime parameter
+    ///   // to `'static` and then move that out of the block.
+    ///   let by_val: Supercow<'static, u32> =
+    ///     Supercow::take_ownership(by_ref);
+    ///   by_val
+    /// };
+    /// assert_eq!(42, *s);
+    /// ```
+    pub fn take_ownership<NS : ConstDeref<Target = BORROWED>>
+        (this: Self)
+         -> Supercow<'static, OWNED, BORROWED, NS>
+    {
         match this.state {
             Owned(o) => Supercow {
                 ptr_mask: this.ptr_mask,
