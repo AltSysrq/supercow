@@ -481,6 +481,27 @@
 //!  ret
 //! ```
 //!
+//! The same code on ARM v7l and Rust 1.12.1:
+//!
+//! ```text
+//!  Cow                                Supercow
+//!  push	{fp, lr}                push	{fp, lr}
+//!  mov	r2, r0                  ldr	r3, [r0, #4]
+//!  ldr	r3, [r2, #4]!           ldr	r2, [r1, #4]
+//!  ldr	ip, [r0]                ldr	lr, [r0]
+//!  mov	r0, r1                  and	r0, r3, r0
+//!  ldr	lr, [r0, #4]!           ldr	ip, [r1]
+//!  ldr	r1, [r1]                and	r1, r2, r1
+//!  cmp	ip, #1                  ldr	r0, [r0, lr]
+//!  moveq	r3, r2                  ldr	r1, [r1, ip]
+//!  cmp	r1, #1                  add	r0, r1, r0
+//!  ldr	r2, [r3]                pop	{fp, pc}
+//!  moveq	lr, r0
+//!  ldr	r0, [lr]
+//!  add	r0, r0, r2
+//!  pop	{fp, pc}
+//! ```
+//!
 //! ## `to_mut` Cost
 //!
 //! Obtaining a `Ref` is substantially more expensive than `Deref`, as it must
