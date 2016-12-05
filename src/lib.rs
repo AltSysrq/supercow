@@ -239,7 +239,7 @@
 //! ```ignore
 //! struct Resources {
 //!   db: Database,
-//!   table: Table<'?>, // Uh, what is the lifetime here?
+//!   table: Table<'uhhh>, // Uh, what is the lifetime here?
 //! }
 //! ```
 //!
