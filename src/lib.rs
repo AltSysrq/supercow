@@ -389,10 +389,10 @@
 //!
 //! ## Variance
 //!
-//! `Supercow` is covariant on its lifetime and all its type parameters, *if*
-//! the type parameters themselves are covariant. `DefaultFeatures` and
-//! `NonSyncSupercow` are *not* covariant and as a result a mundane `Supercow`
-//! is invariant.
+//! `Supercow` is covariant on its lifetime and all its type parameters, except
+//! for `SHARED` which is invariant. Note that because the default type of
+//! `SHARED` uses `Supercow`'s only lifetime parameter, a simple `Supercow` is
+//! effectively invariant.
 //!
 //! ```
 //! use std::rc::Rc;
@@ -400,9 +400,16 @@
 //! use supercow::Supercow;
 //!
 //! fn assert_covariance<'a, 'b: 'a>(
-//!   one: Supercow<'b, &'b u32, &'b u32, Rc<&'b u32>>)
+//!   one: Supercow<'b, &'b u32, &'b u32, Rc<&'b u32>>,
+//!   two: Supercow<'b, u32>)
 //! {
 //!   let _one_a: Supercow<'a, &'a u32, &'a u32, Rc<&'a u32>> = one;
+//!   // We can't just write `Supercow<'a, u32>` because that would change
+//!   // the boxed type of `SHARED`. There's also not much utility in
+//!   // doing this since the original type parameter would need to be carried
+//!   // around anyway.
+//!   let _two_a: Supercow<'a, u32, u32,
+//!     Box<supercow::DefaultFeatures<'b, Target = u32>>> = two;
 //! }
 //!
 //! # fn main() { }
@@ -847,7 +854,8 @@ supercow_features!(
 /// # }
 /// ```
 pub type NonSyncSupercow<'a, OWNED, BORROWED = OWNED> =
-    Supercow<'a, OWNED, BORROWED, Box<NonSyncFeatures<'a, Target = BORROWED> + 'a>>;
+    Supercow<'a, OWNED, BORROWED,
+             Box<NonSyncFeatures<'a, Target = BORROWED> + 'a>>;
 
 /// The actual generic reference type.
 ///
