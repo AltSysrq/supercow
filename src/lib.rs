@@ -1477,6 +1477,26 @@ mod test {
         assert_eq!(42u32, *x.as_ref());
     }
 
+    #[test]
+    fn owned_mode_survives_moving() {
+        // Using a `HashMap` here because it means the optimiser can't reason
+        // about which one will eventually be chosen, and so one of the values
+        // is guaranteed to eventually be moved off the heap onto the stack.
+        #[inline(never)]
+        fn pick_one() -> Supercow<'static, String> {
+            use std::collections::HashMap;
+
+            let mut hm = HashMap::new();
+            hm.insert("hello", Supercow::owned("hello".to_owned()));
+            hm.insert("world", Supercow::owned("world".to_owned()));
+            hm.into_iter().map(|(_, v)| v).next().unwrap()
+        }
+
+        let s = pick_one();
+        assert!("hello".to_owned() == *s ||
+                "world".to_owned() == *s);
+    }
+
     // This is where the asm in the Performance Notes section comes from.
 
     #[inline(never)]
