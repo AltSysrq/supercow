@@ -358,13 +358,20 @@
 //! The third type parameter type to `Supercow` specifies the shared reference
 //! type.
 //!
-//! The default is `DefaultFeatures`, which is a boxed trait object describing
-//! the features a shared reference type must have while allowing any such
-//! reference to be used without needing a generic type argument.
+//! The default is `DefaultFeatures<'static>`, which is a boxed trait object
+//! describing the features a shared reference type must have while allowing
+//! any such reference to be used without needing a generic type argument.
 //!
 //! An alternate feature set can be found in `NonSyncFeatures`, which is also
-//! usable through the `NonSyncSupercow` typedef. You can create custom feature
-//! traits in this style with `supercow_features!`.
+//! usable through the `NonSyncSupercow` typedef (which also makes it
+//! `'static`). You can create custom feature traits in this style with
+//! `supercow_features!`.
+//!
+//! It is perfectly legal to use a non-`'static` shared reference type. In
+//! fact, the original design for `Supercow<'a>` used `DefaultFeatures<'a>`.
+//! However, a non-`'static` lifetime makes the system harder to use, and if
+//! entangled with `'a` on `Supercow`, makes the structure lifetime-invariant,
+//! which makes it much harder to treat as a reference.
 //!
 //! Boxing the shared reference and putting it behind a trait object both add
 //! overhead, of course. If you wish, you can use a real reference type in the
@@ -410,9 +417,9 @@
 //! ## Variance
 //!
 //! `Supercow` is covariant on its lifetime and all its type parameters, except
-//! for `SHARED` which is invariant. Note that because the default type of
-//! `SHARED` uses `Supercow`'s only lifetime parameter, a simple `Supercow` is
-//! effectively invariant.
+//! for `SHARED` which is invariant. The default `SHARED` type for both
+//! `Supercow` and `NonSyncSupercow` uses the `'static` lifetime, so simple
+//! `Supercow`s are in general covariant.
 //!
 //! ```
 //! use std::rc::Rc;
@@ -424,12 +431,7 @@
 //!   two: Supercow<'b, u32>)
 //! {
 //!   let _one_a: Supercow<'a, &'a u32, &'a u32, Rc<&'a u32>> = one;
-//!   // We can't just write `Supercow<'a, u32>` because that would change
-//!   // the boxed type of `SHARED`. There's also not much utility in
-//!   // doing this since the original type parameter would need to be carried
-//!   // around anyway.
-//!   let _two_a: Supercow<'a, u32, u32,
-//!     Box<supercow::DefaultFeatures<'b, Target = u32>>> = two;
+//!   let _two_a: Supercow<'a, u32> = two;
 //! }
 //!
 //! # fn main() { }
@@ -865,6 +867,9 @@ supercow_features!(
 /// `Supercow` with the default `SHARED` changed to `NonSyncFeatures`, enabling
 /// the use of `Rc` as a shared reference type.
 ///
+/// Note that the `SHARED` type must have `'static` lifetime, since this is
+/// generally more convenient and makes the `Supercow` as a whole covariant.
+///
 /// ## Example
 ///
 /// ```
@@ -877,7 +882,7 @@ supercow_features!(
 /// ```
 pub type NonSyncSupercow<'a, OWNED, BORROWED = OWNED> =
     Supercow<'a, OWNED, BORROWED,
-             Box<NonSyncFeatures<'a, Target = BORROWED> + 'a>>;
+             Box<NonSyncFeatures<'static, Target = BORROWED> + 'static>>;
 
 /// The actual generic reference type.
 ///
@@ -887,7 +892,8 @@ pub type NonSyncSupercow<'a, OWNED, BORROWED = OWNED> =
 /// alarmed, and remember that in most use-cases all you need to worry about is
 /// the stuff concerning `OWNED`.
 pub struct Supercow<'a, OWNED, BORROWED : ?Sized = OWNED,
-                    SHARED = Box<DefaultFeatures<'a, Target = BORROWED> + 'a>>
+                    SHARED = Box<DefaultFeatures<
+                        'static, Target = BORROWED> + 'static>>
 where BORROWED : 'a,
       &'a BORROWED : PointerFirstRef,
       SHARED : ConstDeref<Target = BORROWED> {
