@@ -6,6 +6,8 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+#![deny(missing_docs)]
+
 //! `Supercow` is `Cow` on steroids.
 //!
 //! `Supercow` provides a mechanism for making APIs that accept very general
@@ -351,6 +353,76 @@
 //!
 //! ```
 //!
+//! # Shared Reference Type
+//!
+//! The third type parameter type to `Supercow` specifies the shared reference
+//! type.
+//!
+//! The default is `DefaultFeatures`, which is a boxed trait object describing
+//! the features a shared reference type must have while allowing any such
+//! reference to be used without needing a generic type argument.
+//!
+//! An alternate feature set can be found in `NonSyncFeatures`, which is also
+//! usable through the `NonSyncSupercow` typedef. You can create custom feature
+//! traits in this style with `supercow_features!`.
+//!
+//! Boxing the shared reference and putting it behind a trait object both add
+//! overhead, of course. If you wish, you can use a real reference type in the
+//! third parameter as long as you are OK with losing the flexibility the
+//! boxing would provide. For example,
+//!
+//! ```
+//! use std::rc::Rc;
+//!
+//! use supercow::Supercow;
+//!
+//! # fn main() {
+//! let x: Supercow<u32, u32, Rc<u32>> = Supercow::shared(Rc::new(42u32));
+//! println!("{}", *x);
+//! # }
+//! ```
+//!
+//! Note that you may need to provide an identity `supercow::aux::SharedFrom`
+//! implementation if you have a custom reference type.
+//!
+//! # Advanced
+//!
+//! ## Variance
+//!
+//! `Supercow` is covariant on its lifetime and all its type parameters, *if*
+//! the type parameters themselves are covariant. `DefaultFeatures` and
+//! `NonSyncSupercow` are *not* covariant and as a result a mundane `Supercow`
+//! is invariant.
+//!
+//! ```
+//! use std::rc::Rc;
+//!
+//! use supercow::Supercow;
+//!
+//! fn assert_covariance<'a, 'b: 'a>(
+//!   one: Supercow<'b, &'b u32, &'b u32, Rc<&'b u32>>)
+//! {
+//!   let _one_a: Supercow<'a, &'a u32, &'a u32, Rc<&'a u32>> = one;
+//! }
+//!
+//! # fn main() { }
+//! ```
+//!
+//! ## `Sync` and `Send`
+//!
+//! A `Supercow` is `Sync` and `Send` iff the types it contains, including the
+//! shared reference type, are.
+//!
+//! ```
+//! use supercow::Supercow;
+//!
+//! fn assert_sync_and_send<T : Sync + Send>(_: T) { }
+//! fn main() {
+//!   let s: Supercow<u32> = Supercow::owned(42);
+//!   assert_sync_and_send(s);
+//! }
+//! ```
+//!
 //! # Other Notes
 //!
 //! Using `Supercow` will not give your application `apt-get`-style Super Cow
@@ -389,7 +461,9 @@ pub mod aux {
     /// same reference from `deref()` for any particular implementing value
     /// (including if that value is moved).
     pub unsafe trait ConstDeref {
+        /// The type this value dereferences to.
         type Target : ?Sized;
+        /// Returns the (constant) value that this value dereferences to.
         fn const_deref(&self) -> &Self::Target;
     }
 
@@ -475,8 +549,9 @@ pub mod aux {
     /// ## Unsafety
     ///
     /// Behaviour is undefined if a marked type does not begin with a real
-    /// pointer to a value (with the usual exception of ZSTs) or if other parts
-    /// of the type contain address-dependent information.
+    /// pointer to a value (with the usual exception of ZSTs, where the pointer
+    /// does not need to point to anything in particular) or if other parts of
+    /// the type contain address-dependent information.
     ///
     /// Behaviour is undefined if the reference has any `Drop` implementation,
     /// should a future Rust version make such things possible.
@@ -491,7 +566,14 @@ pub mod aux {
     /// Like `std::convert::From`, but without the blanket implementations that
     /// cause problems for `supercow_features!`.
     pub trait SharedFrom<T> {
+        /// Converts the given `T` to `Self`.
         fn shared_from(t: T) -> Self;
+    }
+    impl <T> SharedFrom<Rc<T>> for Rc<T> {
+        fn shared_from(t: Rc<T>) -> Rc<T> { t }
+    }
+    impl <T> SharedFrom<Arc<T>> for Arc<T> {
+        fn shared_from(t: Arc<T>) -> Arc<T> { t }
     }
 }
 
@@ -531,6 +613,8 @@ macro_rules! supercow_features {
     ($(#[$meta:meta])* pub trait $feature_name:ident: Clone $(, $req:ident)*) => {
         $(#[$meta])*
         pub trait $feature_name<'a>: $($req +)* $crate::aux::ConstDeref + 'a {
+            /// Clone this value, and then immediately put it into a `Box`
+            /// behind a trait object of this trait.
             fn clone_boxed
                 (&self)
                  -> Box<$feature_name<'a, Target = Self::Target> + 'a>;
@@ -607,6 +691,13 @@ supercow_features!(
 pub type NonSyncSupercow<'a, OWNED, BORROWED = OWNED> =
     Supercow<'a, OWNED, BORROWED, Box<NonSyncFeatures<'a, Target = BORROWED> + 'a>>;
 
+/// The actual generic reference type.
+///
+/// See the module documentation for most of the details.
+///
+/// The generics here may look somewhat frightening at first; try not to be too
+/// alarmed, and remember that in most use-cases all you need to worry about is
+/// the stuff concerning `OWNED`.
 pub struct Supercow<'a, OWNED, BORROWED : ?Sized = OWNED,
                     SHARED = Box<DefaultFeatures<'a, Target = BORROWED> + 'a>>
 where BORROWED : 'a,
@@ -665,14 +756,21 @@ where OWNED : Borrow<BORROWED>,
       BORROWED : 'a,
       &'a BORROWED : PointerFirstRef,
       SHARED : ConstDeref<Target = BORROWED> {
+    /// Creates a new `Supercow` which owns the given value.
+    ///
+    /// This can create a `Supercow` with a `'static` lifetime.
     pub fn owned(inner: OWNED) -> Self {
         Self::from_data(Owned(inner))
     }
 
+    /// Creates a new `Supercow` which borrows the given value.
     pub fn borrowed<T : Borrow<BORROWED> + ?Sized>(inner: &'a T) -> Self {
         Self::from_data(Borrowed(inner.borrow()))
     }
 
+    /// Creates a new `Supercow` using the given shared reference.
+    ///
+    /// The reference must be convertable to `SHARED` via `SharedFrom`.
     pub fn shared<T>(inner: T) -> Self
     where SHARED : SharedFrom<T> {
         Self::from_data(Shared(SHARED::shared_from(inner)))
@@ -763,6 +861,8 @@ where OWNED : Borrow<BORROWED>,
       BORROWED : 'a + ToOwned<Owned = OWNED>,
       for<'l> &'l BORROWED : PointerFirstRef,
       SHARED : ConstDeref<Target = BORROWED> {
+    /// Takes ownership of the underlying value, so that this `Supercow` has a
+    /// `'static` lifetime.
     pub fn take_ownership(this: Self)
                           -> Supercow<'static, OWNED, BORROWED, SHARED> {
         match this.state {
@@ -785,6 +885,8 @@ where OWNED : Borrow<BORROWED>,
       BORROWED : 'a + ToOwned<Owned = OWNED>,
       &'a BORROWED : PointerFirstRef,
       SHARED : ConstDeref<Target = BORROWED> {
+    /// Takes ownership of the underling value if needed, then returns it,
+    /// consuming `self`.
     pub fn into_inner(this: Self) -> OWNED {
         match this.state {
             Owned(o) => o,
@@ -800,6 +902,17 @@ where OWNED : SafeBorrow<BORROWED>,
       BORROWED : 'a + ToOwned<Owned = OWNED>,
       &'a BORROWED : PointerFirstRef,
       SHARED : ConstDeref<Target = BORROWED> {
+    /// Returns a (indirect) mutable reference to an underlying owned value.
+    ///
+    /// If this `Supercow` does not currently own the value, it takes
+    /// ownership. A `Ref` is then returned which allows accessing the mutable
+    /// owned value directly.
+    ///
+    /// ## Leak Safety
+    ///
+    /// If the returned `Ref` is released without its destructor being run, the
+    /// behaviour of the `Supercow` is unspecified (but does not result in
+    /// memory unsafety).
     pub fn to_mut<'b>(&'b mut self) -> Ref<'a, 'b, OWNED, BORROWED, SHARED> {
         // Take ownership if we do not already have it
         let new = match self.state {
@@ -826,6 +939,9 @@ where OWNED : SafeBorrow<BORROWED>,
     }
 }
 
+/// Provides mutable access to an owned value within a `Supercow`.
+///
+/// This is similar to the `Ref` used with `RefCell`.
 pub struct Ref<'a, 'b, OWNED, BORROWED : ?Sized, SHARED>
 where 'a: 'b,
       OWNED : 'b + SafeBorrow<BORROWED>,
