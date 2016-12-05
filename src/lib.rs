@@ -980,6 +980,39 @@ where OWNED : Borrow<BORROWED>,
         this
     }
 
+    /// If `this` is non-owned, clone `this` and return it.
+    ///
+    /// Otherwise, return `None`.
+    ///
+    /// ## Example
+    ///
+    /// ```
+    /// use supercow::Supercow;
+    ///
+    /// struct SomeNonCloneThing;
+    ///
+    /// let owned: Supercow<SomeNonCloneThing> = SomeNonCloneThing.into();
+    /// assert!(Supercow::clone_non_owned(&owned).is_none());
+    ///
+    /// let the_thing = SomeNonCloneThing;
+    /// let borrowed: Supercow<SomeNonCloneThing> = (&the_thing).into();
+    /// let also_borrowed = Supercow::clone_non_owned(&borrowed).unwrap();
+    /// ```
+    pub fn clone_non_owned(this: &Self) -> Option<Self>
+    where SHARED : Clone {
+        match this.state {
+            Owned(_) => None,
+            Borrowed(r) => Some(Supercow {
+                state: Borrowed(r),
+                .. *this
+            }),
+            Shared(ref r) => Some(Supercow {
+                state: Shared(r.clone()),
+                .. *this
+            }),
+        }
+    }
+
     fn set_ptr(&mut self) {
         {
             let borrowed_ptr = match self.state {
