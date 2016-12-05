@@ -1497,6 +1497,93 @@ mod test {
                 "world".to_owned() == *s);
     }
 
+    #[test]
+    fn dst_string_str() {
+        let mut s: Supercow<'static, String, str> = String::new().into();
+        let mut expected = String::new();
+        for i in 0..1024 {
+            assert_eq!(expected.as_str(), &*s);
+            expected.push_str(&format!("{}", i));
+            s.to_mut().push_str(&format!("{}", i));
+            assert_eq!(expected.as_str(), &*s);
+        }
+    }
+
+    #[test]
+    fn dst_vec_u8s() {
+        let mut s: Supercow<'static, Vec<u8>, [u8]> = Vec::new().into();
+        let mut expected = Vec::<u8>::new();
+        for i in 0..1024 {
+            assert_eq!(&expected[..], &*s);
+            expected.push((i & 0xFF) as u8);
+            s.to_mut().push((i & 0xFF) as u8);
+            assert_eq!(&expected[..], &*s);
+        }
+    }
+
+    #[test]
+    fn dst_osstring_osstr() {
+        use std::ffi::{OsStr, OsString};
+
+        let mut s: Supercow<'static, OsString, OsStr> = OsString::new().into();
+        let mut expected = OsString::new();
+        for i in 0..1024 {
+            assert_eq!(expected.as_os_str(), &*s);
+            expected.push(&format!("{}", i));
+            s.to_mut().push(&format!("{}", i));
+            assert_eq!(expected.as_os_str(), &*s);
+        }
+    }
+
+    #[test]
+    fn dst_cstring_cstr() {
+        use std::ffi::{CStr, CString};
+        use std::mem;
+        use std::ops::Deref;
+
+        let mut s: Supercow<'static, CString, CStr> =
+            CString::new("").unwrap().into();
+        let mut expected = CString::new("").unwrap();
+        for i in 0..1024 {
+            assert_eq!(expected.deref(), &*s);
+            {
+                let mut ve = expected.into_bytes_with_nul();
+                ve.pop();
+                ve.push(((i & 0xFF) | 1) as u8);
+                ve.push(0);
+                expected = unsafe {
+                    CString::from_vec_unchecked(ve)
+                };
+            }
+            {
+                let mut m = s.to_mut();
+                let mut vs = mem::replace(&mut *m, CString::new("").unwrap())
+                    .into_bytes_with_nul();
+                vs.pop();
+                vs.push(((i & 0xFF) | 1) as u8);
+                vs.push(0);
+                *m = unsafe {
+                    CString::from_vec_unchecked(vs)
+                };
+            }
+            assert_eq!(expected.deref(), &*s);
+        }
+    }
+
+    #[test]
+    fn dst_pathbuf_path() {
+        use std::path::{Path, PathBuf};
+
+        let mut s: Supercow<'static, PathBuf, Path> = PathBuf::new().into();
+        let mut expected = PathBuf::new();
+        for i in 0..1024 {
+            assert_eq!(expected.as_path(), &*s);
+            expected.push(format!("{}", i));
+            s.to_mut().push(format!("{}", i));
+            assert_eq!(expected.as_path(), &*s);
+        }
+    }
+
     // This is where the asm in the Performance Notes section comes from.
 
     #[inline(never)]
