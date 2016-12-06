@@ -1013,6 +1013,41 @@ where OWNED : Borrow<BORROWED>,
         }
     }
 
+    /// If `this` is borrowed, return the underlying reference with the
+    /// original lifetime. Otherwise, return `None`.
+    ///
+    /// The returned reference has a lifetime independent of `this`.
+    ///
+    /// This can be used to bridge between `Supercow` APIs and mundane
+    /// reference APIs without needing to restrict the lifetime to the
+    /// `Supercow`, but as a result is only available if the contained
+    /// reference is actually independent.
+    ///
+    /// ## Example
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    ///
+    /// use supercow::Supercow;
+    ///
+    /// let fourty_two: u32 = 42;
+    ///
+    /// let borrowed: Supercow<u32> = (&fourty_two).into();
+    /// assert_eq!(Some(&fourty_two), Supercow::extract_ref(&borrowed));
+    ///
+    /// let owned: Supercow<u32> = fourty_two.into();
+    /// assert_eq!(None, Supercow::extract_ref(&owned));
+    ///
+    /// let shared: Supercow<u32> = Arc::new(fourty_two).into();
+    /// assert_eq!(None, Supercow::extract_ref(&shared));
+    /// ```
+    pub fn extract_ref(this: &Self) -> Option<&'a BORROWED> {
+        match this.state {
+            Borrowed(r) => Some(r),
+            _ => None,
+        }
+    }
+
     fn set_ptr(&mut self) {
         {
             let borrowed_ptr = match self.state {
