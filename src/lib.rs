@@ -965,12 +965,14 @@ defimpl! {[] (Drop for) where { } {
 
 defimpl! {@unsafe [] (Send for) where {
     OWNED : Send,
+    &'a BORROWED : Send,
     SHARED : Send,
     STORAGE : Send,
 } { } }
 
 defimpl! {@unsafe [] (Sync for) where {
     OWNED : Sync,
+    &'a BORROWED : Sync,
     SHARED : Sync,
     STORAGE : Sync,
 } { } }
