@@ -647,18 +647,26 @@
 //!
 //! ## Memory Usage
 //!
-//! The default `Supercow` is only one pointer wider than a mundane reference.
+//! The default `Supercow` is only one pointer wider than a mundane reference
+//! on Rust 1.13.0 and later. Earlier Rust versions have an extra word due to
+//! the drop flag.
 //!
 //! ```
-//! use std::mem;
+//! use std::mem::size_of;
 //!
 //! use supercow::Supercow;
 //!
-//! assert_eq!(mem::size_of::<&'static u32>() + mem::size_of::<*const ()>(),
-//!            mem::size_of::<Supercow<'static, u32>>());
+//! // Determine the size of the drop flag including alignment padding.
+//! // On Rust 0.13.0+, `dflag` will be zero.
+//! struct DropFlag(*const ());
+//! impl Drop for DropFlag { fn drop(&mut self) { } }
+//! let dflag = size_of::<DropFlag>() - size_of::<*const ()>();
 //!
-//! assert_eq!(mem::size_of::<&'static str>() + mem::size_of::<*const ()>(),
-//!            mem::size_of::<Supercow<'static, String, str>>());
+//! assert_eq!(size_of::<&'static u32>() + size_of::<*const ()>() + dflag,
+//!            size_of::<Supercow<'static, u32>>());
+//!
+//! assert_eq!(size_of::<&'static str>() + size_of::<*const ()>() + dflag,
+//!            size_of::<Supercow<'static, String, str>>());
 //! ```
 //!
 //! Of course, you also pay for heap space in this case when using owned or
