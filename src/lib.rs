@@ -120,6 +120,68 @@
 //! }
 //! ```
 //!
+//! ## Chosing the right variant
+//!
+//! `Supercow` is extremely flexible as to how it internally stores and manages
+//! data. There are four variants provided by default: `Supercow`,
+//! `NonSyncSupercow`, `InlineSupercow`, and `InlineNonSyncSupercow`. Here is a
+//! quick reference on the trade-offs:
+//!
+//! | Variant           | Send+Sync?    | `Rc`? | Size  | Init  | Deref      |
+//! |-------------------|---------------|-------|-------|-------|------------|
+//! | (Default)         | Yes           | No    | Small | Slow  | Very Fast  |
+//! | `NonSync`         | No            | Yes   | Small | Slow  | Very Fast  |
+//! | `Inline`          | Yes           | No    | Big   | Fast  | Fast       |
+//! | `InlineNonSync`   | No            | Yes   | Big   | Fast  | Fast       |
+//!
+//! "Init" above specifically refers to initialisation with an owned value or
+//! shared reference. Supercows constructed with mundane references always
+//! construct extremely quickly.
+//!
+//! The only difference between the `NonSync` variant and the default is that
+//! the default is to require the shared pointer type (eg, `Arc`) to be `Send`
+//! and `Sync` (which thus prohibits using `Rc`), whereas `NonSync` does not
+//! and so allows `Rc`.
+//!
+//! By default, `Supercow` boxes any owned value or shared reference. This
+//! makes the `Deref` implementation faster since it does not need to account
+//! for internal pointers, but more importantly, means that the `Supercow` does
+//! not need to reserve space for the owned and shared values, so the default
+//! `Supercow` is only one pointer wider than a bare reference. (Note that if
+//! you are looking to eliminate allocation entirely, you will also need to
+//! tinker with the `SHARED` type, which by default has its own `Box` as well.)
+//!
+//! The obvious problem with boxing values is that it makes construction of the
+//! `Supercow` slower, as one must pay for an allocation. If you want to avoid
+//! the allocation, you can use the `Inline` variants instead, which store the
+//! values inline inside the `Supercow`. Note that this of course makes the
+//! `Supercow` much bigger; be particularly careful if you create a hierarchy
+//! of things containing `InlineSupercow`s referencing each other, as each
+//! would effectively have space for the entire tree above it inline.
+//!
+//! The default to box values was chosen on the grounds that it is generally
+//! easier to use, less likely to cause confusing problems, and in many cases
+//! the allocation doesn't affect performance:
+//!
+//! - In either choice, creating a `Supercow` with a borrowed reference incurs
+//! no allocation. The boxed option will actually be slightly faster since it
+//! does not need to initialise as much memory and results in better locality
+//! due to being smaller.
+//!
+//! - The value contained usually is reasonably expensive to construct anyway,
+//! or else there would be less incentive to pass it around as a reference when
+//! possible. In these cases, the extra allocation likely is a minor impact on
+//! performance.
+//!
+//! - Overuse of boxed values results in a "uniform slowness" that can be
+//! identified reasonably easily, and results in a linear performance
+//! degradation relative to overuse. Overuse of `InlineSupercow`s at best
+//! results in linear memory bloat, but if `InlineSupercow`s reference
+//! structures containing other `InlineSupercow`s, the result can even be
+//! exponential bloat to the structures. At best, this is a harder problem to
+//! track down; at worst, it can result in entirely non-obvious stack
+//! overflows.
+//!
 //! # Use Cases
 //!
 //! ## More flexible Copy-on-Write
@@ -358,9 +420,10 @@
 //! The third type parameter type to `Supercow` specifies the shared reference
 //! type.
 //!
-//! The default is `DefaultFeatures<'static>`, which is a boxed trait object
-//! describing the features a shared reference type must have while allowing
-//! any such reference to be used without needing a generic type argument.
+//! The default is `Box<DefaultFeatures<'static>>`, which is a boxed trait
+//! object describing the features a shared reference type must have while
+//! allowing any such reference to be used without needing a generic type
+//! argument.
 //!
 //! An alternate feature set can be found in `NonSyncFeatures`, which is also
 //! usable through the `NonSyncSupercow` typedef (which also makes it
@@ -412,6 +475,27 @@
 //! different types, `Supercow::shared()` will be needed to construct the
 //! `Supercow` explicitly.
 //!
+//! # Storage Type
+//!
+//! When in owned or shared mode, a `Supercow` needs someplace to store the
+//! `OWNED` or `SHARED` value itself. This can be customised with the fourth
+//! type parameter and the `OwnedStorage` trait. Two strategies are provided by
+//! this crate:
+//!
+//! - `BoxedStorage` puts everything behind `Box`es. This has the advantage
+//! that the `Supercow` structure is only one pointer wider than a basic
+//! reference, and results in a faster `Deref`. The obvious drawback is that
+//! you pay for allocations on construction. This is the default with
+//! `Supercow` and `NonSyncSupercow`.
+//!
+//! - `InlineStorage` uses an `enum` to store the values inline in the
+//! `Supercow`, thus incurring no allocation, but making the `Supercow` itself
+//! bigger. This is easily available via the `InlineSupercow` and
+//! `InlineNonSyncSupercow` types.
+//!
+//! If you find some need, you can define custom storage types, though note
+//! that the trait is quite unsafe and somewhat subtle.
+//!
 //! # Advanced
 //!
 //! ## Variance
@@ -427,11 +511,15 @@
 //! use supercow::Supercow;
 //!
 //! fn assert_covariance<'a, 'b: 'a>(
-//!   one: Supercow<'b, &'b u32, &'b u32, Rc<&'b u32>>,
-//!   two: Supercow<'b, u32>)
+//!   imm: Supercow<'b, u32>,
+//!   bor: &'b Supercow<'b, u32>)
 //! {
-//!   let _one_a: Supercow<'a, &'a u32, &'a u32, Rc<&'a u32>> = one;
-//!   let _two_a: Supercow<'a, u32> = two;
+//!   let _imm_a: Supercow<'a, u32> = imm;
+//!   let _bor_aa: &'a Supercow<'a, u32> = bor;
+//!   let _bor_ab: &'a Supercow<'b, u32> = bor;
+//!   // Invalid, since the external `&'b` reference is declared to live longer
+//!   // than the internal `&'a` reference.
+//!   // let _bor_ba: &'b Supercow<'a, u32> = bor;
 //! }
 //!
 //! # fn main() { }
@@ -460,16 +548,18 @@
 //! compile-time to run-time, `Supercow` is obviously not as fast as using an
 //! owned value directly or a reference directly.
 //!
-//! Constructing a `Supercow` with an owned object or a simple reference is
-//! reasonably fast, but does incur a small amount of overhead for the pointer
-//! displacement to be set up.
+//! Constructing any kind of `Supercow` with a normal reference is very fast,
+//! only requiring a bit of internal memory initialisation besides setting the
+//! reference itself.
 //!
-//! The default `Supercow` shared reference type boxes the reference, incurring
-//! an allocation as well as virtual dispatch on certain operations. This is
-//! obviously much more expensive than the other options, though note that the
-//! allocation is only incurred when constructing the `Supercow`, so this is
-//! inconsequential in a create-once-use-many case. Use of a concrete shared
-//! reference type alleviates this issue.
+//! The defual `Supercow` type boxes the owned type and double-boxes the shared
+//! type. This obviously dominates construction cost in those cases.
+//!
+//! `InlineSupercow` eliminates one box layer. This means that constructing an
+//! owned instance is simply a move of the owned structure plus the common
+//! reference initialisation. Shared values still by default require one boxing
+//! level as well as virtual dispatch on certain operations; as described
+//! above, this property too can be dealt with by using a custom `SHARED` type.
 //!
 //! ## Destruction Cost
 //!
@@ -478,17 +568,22 @@
 //!
 //! ## `Deref` Cost
 //!
-//! `Supercow`'s `deref` implementation is branch-free and therefore generally
-//! runs reasonably quickly. It is not dependent on the ownership mode of the
-//! `Supercow`, and so is not affected by the shared reference type, most
-//! importantly, making no virtual function calls even under the default boxed
-//! shared reference type. However, the way it works may prevent LLVM
-//! optimisations from applying in particular circumstances.
+//! For the default `Supercow` type, the `Deref` is exactly equivalent to
+//! dereferencing an `&&BORROWED`.
+//!
+//! For `InlineSupercow`, the implementation is a bit slower, comparable to
+//! `std::borrow::Cow` but with fewer memory accesses..
+//!
+//! In all cases, the `Deref` implementation is not dependent on the ownership
+//! mode of the `Supercow`, and so is not affected by the shared reference
+//! type, most importantly, making no virtual function calls even under the
+//! default boxed shared reference type. However, the way it works colud
+//! prevent LLVM optimisations from applying in particular circumstances.
 //!
 //! For those wanting specifics, the function
 //!
 //! ```ignore
-//! // Substitute Cow with Supercow for the other case.
+//! // Substitute Cow with InlineSupercow for the other case.
 //! // This takes references so that the destructor code is not intermingled.
 //! fn add_two(a: &Cow<u32>, b: &Cow<u32>) -> u32 {
 //!   **a + **b
@@ -500,36 +595,43 @@
 //! ```text
 //!  Cow                                Supercow
 //!  cmp    DWORD PTR [rdi],0x1         mov    rcx,QWORD PTR [rdi]
-//!  lea    rcx,[rdi+0x4]               and    rdi,QWORD PTR [rdi+0x8]
-//!  cmovne rcx,QWORD PTR [rdi+0x8]     mov    rax,QWORD PTR [rsi]
-//!  cmp    DWORD PTR [rsi],0x1         and    rsi,QWORD PTR [rsi+0x8]
-//!  lea    rax,[rsi+0x4]               mov    eax,DWORD PTR [rsi+rax]
-//!  cmovne rax,QWORD PTR [rsi+0x8]     add    eax,DWORD PTR [rdi+rcx]
-//!  mov    eax,DWORD PTR [rax]         ret
-//!  add    eax,DWORD PTR [rcx]
-//!  ret
+//!  lea    rcx,[rdi+0x4]               xor    eax,eax
+//!  cmovne rcx,QWORD PTR [rdi+0x8]     cmp    rcx,0x800
+//!  cmp    DWORD PTR [rsi],0x1         cmovae rdi,rax
+//!  lea    rax,[rsi+0x4]               mov    rdx,QWORD PTR [rsi]
+//!  cmovne rax,QWORD PTR [rsi+0x8]     cmp    rdx,0x800
+//!  mov    eax,DWORD PTR [rax]         cmovb  rax,rsi
+//!  add    eax,DWORD PTR [rcx]         mov    eax,DWORD PTR [rax+rdx]
+//!  ret                                add    eax,DWORD PTR [rdi+rcx]
+//!                                     ret
 //! ```
 //!
 //! The same code on ARM v7l and Rust 1.12.1:
 //!
 //! ```text
 //!  Cow                                Supercow
-//!  push       {fp, lr}                push    {fp, lr}
-//!  mov        r2, r0                  ldr     r3, [r0, #4]
-//!  ldr        r3, [r2, #4]!           ldr     r2, [r1, #4]
-//!  ldr        ip, [r0]                ldr     lr, [r0]
-//!  mov        r0, r1                  and     r0, r3, r0
-//!  ldr        lr, [r0, #4]!           ldr     ip, [r1]
-//!  ldr        r1, [r1]                and     r1, r2, r1
-//!  cmp        ip, #1                  ldr     r0, [r0, lr]
-//!  moveq      r3, r2                  ldr     r1, [r1, ip]
-//!  cmp        r1, #1                  add     r0, r1, r0
-//!  ldr        r2, [r3]                pop     {fp, pc}
+//!  push       {fp, lr}                ldr     r2, [r0]
+//!  mov        r2, r0                  ldr     r3, [r1]
+//!  ldr        r3, [r2, #4]!           cmp     r2, #2048
+//!  ldr        ip, [r0]                addcc   r2, r2, r0
+//!  mov        r0, r1                  cmp     r3, #2048
+//!  ldr        lr, [r0, #4]!           addcc   r3, r3, r1
+//!  ldr        r1, [r1]                ldr     r0, [r2]
+//!  cmp        ip, #1                  ldr     r1, [r3]
+//!  moveq      r3, r2                  add     r0, r1, r0
+//!  cmp        r1, #1                  bx      lr
+//!  ldr        r2, [r3]
 //!  moveq      lr, r0
 //!  ldr        r0, [lr]
 //!  add        r0, r0, r2
 //!  pop        {fp, pc}
 //! ```
+//!
+//! If the default `Supercow` is used above instead of `InlineSupercow`, the
+//! function actually compiles to the same thing as one taking two `&u32`
+//! arguments. (This is partially due to optimisations eliminating one level of
+//! indirection; if the optimiser did not do as much, it would be equivalent to
+//! taking two `&&u32` arguments.)
 //!
 //! ## `to_mut` Cost
 //!
@@ -543,71 +645,60 @@
 //!
 //! ## Memory Usage
 //!
-//! `Supercow` can be quite large in comparison to a bare reference. This
-//! stems from two sources:
-//!
-//! - There are two pointers of overhead (or three for DSTs) used for the
-//! branch-free `Deref` implementation.
-//!
-//! - The `Supercow` must be able to contain a full instance of `OWNED`.
-//!
-//! The second can be addressed in a couple ways. Firstly, you can make the
-//! `OWNED` type a `Box`. If you need something that depends on `ToOwned`, it
-//! may be necessary to wrap the owned value in a non-`Clone` struct that
-//! implements `ToOwned` by boxing itself.
+//! The default `Supercow` is only one pointer wider than a mundane reference
+//! on Rust 1.13.0 and later. Earlier Rust versions have an extra word due to
+//! the drop flag.
 //!
 //! ```
-//! use supercow::Supercow;
-//!
-//! const N: usize = 65536;
-//! fn nth(array: &Supercow<Box<[u64;N]>, [u64;N]>, n: usize) -> u64 {
-//!   array[n]
-//! }
-//! fn main() {
-//!   let array: [u64;N] = [0;N];
-//!   let boxed_array: Box<[u64;N]> = Box::new([0;N]);
-//!   assert_eq!(0, nth(&Supercow::borrowed(&array), 42));
-//!   assert_eq!(0, nth(&Supercow::owned(boxed_array), 56));
-//! }
-//! ```
-//!
-//! If the owned (or shared) states are certainly never used, another option is
-//! to use an uninhabited type (possibly `!` depending on its state when it
-//! becomes stable). Because there is currently no way to provide a blanket
-//! implementation of `Borrow<T>` for all `T`, and there will never be a way to
-//! blanket `ConstDeref` in this way, `supercow` does not provide such a type
-//! at this time, but you can easily define your own.
-//!
-//! ```
-//! use std::borrow::Borrow;
-//! use std::sync::Arc;
+//! use std::mem::size_of;
 //!
 //! use supercow::Supercow;
 //!
-//! enum Void { }
-//! impl Borrow<u32> for Void {
-//!   fn borrow(&self) -> &u32 {
-//!     match *self { }
-//!   }
-//! }
-//! unsafe impl supercow::aux::SafeBorrow<u32> for Void {
-//!   fn borrow_replacement(ptr: &u32) -> &u32 { ptr }
-//! }
-//! unsafe impl supercow::aux::ConstDeref for Void {
-//!   type Target = u32;
-//!   fn const_deref(&self) -> &u32 {
-//!     match *self { }
-//!   }
-//! }
+//! // Determine the size of the drop flag including alignment padding.
+//! // On Rust 0.13.0+, `dflag` will be zero.
+//! struct DropFlag(*const ());
+//! impl Drop for DropFlag { fn drop(&mut self) { } }
+//! let dflag = size_of::<DropFlag>() - size_of::<*const ()>();
 //!
-//! fn never_owned(s: &Supercow<Void, u32>) -> u32 { **s }
-//! fn never_shared(s: &Supercow<u32, u32, Void>) -> u32 { **s }
+//! assert_eq!(size_of::<&'static u32>() + size_of::<*const ()>() + dflag,
+//!            size_of::<Supercow<'static, u32>>());
 //!
-//! fn main() {
-//!   never_owned(&Supercow::shared(Arc::new(42)));
-//!   never_shared(&Supercow::owned(56));
-//! }
+//! assert_eq!(size_of::<&'static str>() + size_of::<*const ()>() + dflag,
+//!            size_of::<Supercow<'static, String, str>>());
+//! ```
 //!
+//! Of course, you also pay for heap space in this case when using owned or
+//! shared `Supercow`s.
+//!
+//! `InlineSupercow` can be quite large in comparison to a normal reference.
+//! You need to be particularly careful that structures you reference don't
+//! themselves contain `InlineSupercow`s or you can end up with
+//! quadratically-sized or even exponentially-sized structures.
+//!
+//! ```
+//! use std::mem;
+//!
+//! use supercow::InlineSupercow;
+//!
+//! // Define our structures
+//! // (The extra lifetimes are needed for intra-function lifetime inference to
+//! // succeed.)
+//! struct Big([u8;1024]);
+//! struct A<'a>(InlineSupercow<'a, Big>);
+//! struct B<'b,'a:'b>(InlineSupercow<'b, A<'a>>);
+//! struct C<'b,'a:'b>(InlineSupercow<'b, B<'a,'a>>);
+//!
+//! // Now say an API consumer, etc, decides to use references
+//! let big = Big([0u8;1024]);
+//! let a = A((&big).into());
+//! let b = B((&a).into());
+//! let c = C((&b).into());
+//!
+//! // Well, we've now allocated space for four `Big`s on the stack, despite
+//! // only really needing one.
+//! assert!(mem::size_of_val(&big) + mem::size_of_val(&a) +
+//!         mem::size_of_val(&b) + mem::size_of_val(&c) >
+//!         4 * mem::size_of::<Big>());
 //! ```
 //!
 //! # Other Notes
@@ -615,158 +706,21 @@
 //! Using `Supercow` will not give your application `apt-get`-style Super Cow
 //! Powers.
 
-use std::borrow::{Borrow, ToOwned};
-use std::convert::{AsRef, From};
+pub mod ext;
+
+use std::borrow::Borrow;
 use std::cmp;
+use std::convert::AsRef;
 use std::fmt;
-use std::mem;
 use std::hash::{Hash, Hasher};
+use std::marker::PhantomData;
+use std::mem;
 use std::ops::{Deref, DerefMut};
+use std::ptr;
 use std::rc::Rc;
-use std::slice;
 use std::sync::Arc;
 
-/// Miscelaneous things used to integrate other code with Supercow, but which
-/// are not of interest to end users.
-pub mod aux {
-    use std::borrow::Borrow;
-    use std::ffi::{CStr, OsStr};
-    use std::path::Path;
-    use std::rc::Rc;
-    use std::slice;
-    use std::sync::Arc;
-
-    /// Marker trait indicating a `Deref`-like which always returns the same
-    /// reference.
-    ///
-    /// This is not indended for general use outside Supercow. Notably, `Box`
-    /// and mundane references satisfy this trait's requirements, but
-    /// deliberately do not implement it. It is also not a subtrait of `Deref`
-    /// due to some additional special logic around boxes.
-    ///
-    /// ## Unsafety
-    ///
-    /// Behaviour is undefined if the implementation does not always return the
-    /// same reference from `deref()` for any particular implementing value
-    /// (including if that value is moved).
-    pub unsafe trait ConstDeref {
-        /// The type this value dereferences to.
-        type Target : ?Sized;
-        /// Returns the (constant) value that this value dereferences to.
-        fn const_deref(&self) -> &Self::Target;
-    }
-
-    unsafe impl<T : ?Sized> ConstDeref for Rc<T> {
-        type Target = T;
-        fn const_deref(&self) -> &T { self }
-    }
-
-    unsafe impl<T : ?Sized> ConstDeref for Arc<T> {
-        type Target = T;
-        fn const_deref(&self) -> &T { self }
-    }
-
-    unsafe impl<T : ConstDeref + ?Sized> ConstDeref for Box<T> {
-        type Target = T::Target;
-        fn const_deref(&self) -> &T::Target {
-            (**self).const_deref()
-        }
-    }
-
-    /// Extension of `Borrow` used to allow `Supercow::to_mut()` to work
-    /// safely.
-    pub unsafe trait SafeBorrow<T : ?Sized>: Borrow<T> {
-        /// Given `ptr`, which was obtained from a prior call to
-        /// `Self::borrow()`, return a value with the same nominal lifetime
-        /// which is guaranteed to survive mutations to `Self`.
-        ///
-        /// Types which implement `Borrow` by pure, constant pointer arithmetic
-        /// on `self` can simply return `ptr` unmodified. Other types typically
-        /// need to provide some static reference, such as the empty string for
-        /// `&str`.
-        ///
-        /// ## Unsafety
-        ///
-        /// Behaviour is undefined if this call returns `ptr`, but a mutation
-        /// to `Self` could invalidate the reference.
-        fn borrow_replacement<'a>(ptr: &'a T) -> &'a T;
-    }
-    unsafe impl<T : ?Sized> SafeBorrow<T> for T {
-        fn borrow_replacement(ptr: &T) -> &T { ptr }
-    }
-    unsafe impl<B, T> SafeBorrow<[B]> for T where T : Borrow<[B]> {
-        fn borrow_replacement(_: &[B]) -> &[B] {
-            unsafe {
-                slice::from_raw_parts(1 as usize as *const B, 0)
-            }
-        }
-    }
-    unsafe impl<T> SafeBorrow<str> for T where T : Borrow<str> {
-        fn borrow_replacement(_: &str) -> &str { "" }
-    }
-    unsafe impl<T> SafeBorrow<CStr> for T
-    where T : Borrow<CStr> {
-        fn borrow_replacement(_: &CStr) -> &CStr {
-            static EMPTY_CSTR: &'static [u8] = &[0];
-            unsafe {
-                CStr::from_bytes_with_nul_unchecked(EMPTY_CSTR)
-            }
-        }
-    }
-    unsafe impl<T> SafeBorrow<OsStr> for T
-    where T : Borrow<OsStr> {
-        fn borrow_replacement(_: &OsStr) -> &OsStr {
-            OsStr::new("")
-        }
-    }
-    unsafe impl<T> SafeBorrow<Path> for T
-    where T : Borrow<Path> {
-        fn borrow_replacement(_: &Path) -> &Path {
-            Path::new("")
-        }
-    }
-
-    /// Marker trait identifying a reference type which begins with an absolute
-    /// address and contains no other address-dependent information.
-    ///
-    /// `Supercow` expects to be able to read the first pointer-sized value of
-    /// such a reference and perform address arithmetic upon it.
-    ///
-    /// There is no utility of applying this trait to anything other than a
-    /// const reference.
-    ///
-    /// ## Unsafety
-    ///
-    /// Behaviour is undefined if a marked type does not begin with a real
-    /// pointer to a value (with the usual exception of ZSTs, where the pointer
-    /// does not need to point to anything in particular) or if other parts of
-    /// the type contain address-dependent information.
-    ///
-    /// Behaviour is undefined if the reference has any `Drop` implementation,
-    /// should a future Rust version make such things possible.
-    pub unsafe trait PointerFirstRef { }
-    unsafe impl<'a, T : Sized> PointerFirstRef for &'a T { }
-    unsafe impl<'a, T> PointerFirstRef for &'a [T] { }
-    unsafe impl<'a> PointerFirstRef for &'a str { }
-    unsafe impl<'a> PointerFirstRef for &'a ::std::ffi::CStr { }
-    unsafe impl<'a> PointerFirstRef for &'a ::std::ffi::OsStr { }
-    unsafe impl<'a> PointerFirstRef for &'a ::std::path::Path { }
-
-    /// Like `std::convert::From`, but without the blanket implementations that
-    /// cause problems for `supercow_features!`.
-    pub trait SharedFrom<T> {
-        /// Converts the given `T` to `Self`.
-        fn shared_from(t: T) -> Self;
-    }
-    impl <T> SharedFrom<Rc<T>> for Rc<T> {
-        fn shared_from(t: Rc<T>) -> Rc<T> { t }
-    }
-    impl <T> SharedFrom<Arc<T>> for Arc<T> {
-        fn shared_from(t: Arc<T>) -> Arc<T> { t }
-    }
-}
-
-use self::aux::*;
+use self::ext::*;
 
 /// Defines a "feature set" for a custom `Supercow` type.
 ///
@@ -801,14 +755,14 @@ macro_rules! supercow_features {
     // allow neither `path` nor `ty`.
     ($(#[$meta:meta])* pub trait $feature_name:ident: Clone $(, $req:ident)*) => {
         $(#[$meta])*
-        pub trait $feature_name<'a>: $($req +)* $crate::aux::ConstDeref + 'a {
+        pub trait $feature_name<'a>: $($req +)* $crate::ext::ConstDeref + 'a {
             /// Clone this value, and then immediately put it into a `Box`
             /// behind a trait object of this trait.
             fn clone_boxed
                 (&self)
                  -> Box<$feature_name<'a, Target = Self::Target> + 'a>;
         }
-        impl<'a, T : 'a + $($req +)* Clone + $crate::aux::ConstDeref>
+        impl<'a, T : 'a + $($req +)* Clone + $crate::ext::ConstDeref>
         $feature_name<'a> for T {
             fn clone_boxed
                 (&self)
@@ -818,7 +772,7 @@ macro_rules! supercow_features {
                 Box::new(cloned)
             }
         }
-        impl<'a, T : $feature_name<'a>> $crate::aux::SharedFrom<T>
+        impl<'a, T : $feature_name<'a>> $crate::ext::SharedFrom<T>
         for Box<$feature_name<'a, Target = T::Target> + 'a> {
             fn shared_from(t: T) -> Self {
                 Box::new(t)
@@ -833,12 +787,12 @@ macro_rules! supercow_features {
 
     ($(#[$meta:meta])* pub trait $feature_name:ident: $($req:ident),*) => {
         $(#[$meta])*
-        pub trait $feature_name<'a>: $($req +)* $crate::aux::ConstDeref + 'a {
+        pub trait $feature_name<'a>: $($req +)* $crate::ext::ConstDeref + 'a {
         }
-        impl<'a, T : 'a + $($req +)* $crate::aux::ConstDeref>
+        impl<'a, T : 'a + $($req +)* $crate::ext::ConstDeref>
         $feature_name<'a> for T {
         }
-        impl<'a, T : $feature_name<'a>> $crate::aux::SharedFrom<T>
+        impl<'a, T : $feature_name<'a>> $crate::ext::SharedFrom<T>
         for Box<$feature_name<'a, Target = T::Target> + 'a> {
             fn shared_from(t: T) -> Self {
                 Box::new(t)
@@ -882,7 +836,28 @@ supercow_features!(
 /// ```
 pub type NonSyncSupercow<'a, OWNED, BORROWED = OWNED> =
     Supercow<'a, OWNED, BORROWED,
-             Box<NonSyncFeatures<'static, Target = BORROWED> + 'static>>;
+             Box<NonSyncFeatures<'static, Target = BORROWED> + 'static>,
+             BoxedStorage>;
+
+/// `Supercow` with the default `STORAGE` changed to `InlineStorage`.
+///
+/// This reduces the number of allocations needed to construct an owned or
+/// shared `Superow` (down to zero for owned, but note that the default
+/// `SHARED` still has its own `Box`) at the cost of bloating the `Supercow`
+/// itself, as it now needs to be able to fit a whole `OWNED` instance.
+pub type InlineSupercow<'a, OWNED, BORROWED = OWNED,
+                       SHARED = Box<DefaultFeatures<
+                           'static, Target = BORROWED> + 'static>> =
+    Supercow<'a, OWNED, BORROWED, SHARED, InlineStorage<OWNED, SHARED>>;
+
+/// `NonSyncSupercow` with the `STORAGE` changed to `InlineStorage`.
+///
+/// This combines both properties of `NonSyncSupercow` and `InlineSupercow`.
+pub type InlineNonSyncSupercow<'a, OWNED, BORROWED = OWNED> =
+    Supercow<'a, OWNED, BORROWED,
+             Box<NonSyncFeatures<'static, Target = BORROWED> + 'static>,
+             InlineStorage<OWNED, Box<
+                 NonSyncFeatures<'static, Target = BORROWED> + 'static>>>;
 
 /// The actual generic reference type.
 ///
@@ -893,90 +868,152 @@ pub type NonSyncSupercow<'a, OWNED, BORROWED = OWNED> =
 /// the stuff concerning `OWNED`.
 pub struct Supercow<'a, OWNED, BORROWED : ?Sized = OWNED,
                     SHARED = Box<DefaultFeatures<
-                        'static, Target = BORROWED> + 'static>>
+                        'static, Target = BORROWED> + 'static>,
+                    STORAGE = BoxedStorage>
 where BORROWED : 'a,
       &'a BORROWED : PointerFirstRef,
-      SHARED : ConstDeref<Target = BORROWED> {
-    // In order to implement `Deref` in a branch-free fashion that isn't
-    // sensitive to the Supercow being moved, we set `ptr_mask` and
-    // `ptr_displacement` such that
-    // `target = &*((&self & sext(ptr_mask)) + ptr_displacement)`
-    // (arithmetic in terms of bytes, obviously).
+      STORAGE : OwnedStorage<OWNED, SHARED> {
+    // This stores the precalculated `Deref` target, and is the only thing the
+    // `Deref` implementation needs to inspect.
     //
-    // So for the three cases:
+    // Note that there are three cases with references:
     //
-    // Owned => ptr_mask = ~0u, ptr_displacement = offsetof(self, Owned.0)
-    // Borrowed, Shared => ptr_mask = 0u, ptr_displacement = address
+    // - A reference to an external value. In this case, we know that the
+    // reference will not be invalidated by movement or for the lifetime of
+    // `'a` and simply store the reference here as an absolute address.
     //
-    // In order to support DSTs, `ptr_displacement` is actually a reference to
-    // `BORROWED`. We assume the first pointer-sized value is the actual
-    // pointer (see `PointerFirstRef`). `ptr_displacement` may not actually be
-    // dereferenced.
-    ptr_displacement: &'a BORROWED,
-    ptr_mask: usize,
-    state: SupercowData<'a, OWNED, BORROWED, SHARED>,
+    // - A reference to a ZST at an "external" location, often address 1. We
+    // don't need to handle this in any particular manner as long as we don't
+    // accidentally make a null reference, since the only thing safe rust can
+    // do with a ZST reference is inspect its address, and if we do "move" it
+    // around, there's nothing unsafe from this fact being leaked.
+    //
+    // - A reference into this `Supercow`. In this case, the absolute address
+    // will change whenever this `Supercow` is relocated. To handle this, we
+    // instead store the offset from `&self` here, and adjust it at `Deref`
+    // time. We differentiate between the two cases by inspecting the absolute
+    // value of the address: If it is less than
+    // `MAX_INTERNAL_BORROW_DISPLACEMENT*2`, we assume it is an internal
+    // reference, since no modern system ever has virtual memory mapped between
+    // 0 and 4kB (and any code elsewhere involving this region is presumably
+    // too low-level to be using `Supercow`).
+    //
+    // One pecularity is that this is declared as a reference even though it
+    // does not necessarily reference anything. This is so that it works with
+    // DSTs, which have references larger than pointers. We assume the first
+    // pointer-sized value is the actual address (see `PointerFirstRef`).
+    //
+    // We do need to take care that we still don't create a null reference
+    // here; there is code to check for Rust putting the internal storage first
+    // in the struct and adding 1 if this happens.
+    //
+    // If `STORAGE` does not use internal pointers, we can skip all the
+    // arithmetic and return this value unmodified.
+    ptr: &'a BORROWED,
+    // The current ownership mode of this `Supercow`.
+    //
+    // This has three states:
+    //
+    // - Null. The `Supercow` holds a `&'a BORROWED`.
+    //
+    // - Even alignment. The `Supercow` holds an `OWNED` accessible via
+    // `STORAGE`, and this value is what is passed into the `STORAGE` methods.
+    //
+    // - Odd alignment. The `Supercow` holds a `SHARED`, behind a `Box` at the
+    // address one less than this value. Note that since the default `SHARED`
+    // is a `Box<DefaultFeatures>`, we actually end up with two levels of
+    // boxing here. This is actually necessary so that the whole thing only
+    // takes one immediate pointer.
+    mode: *mut (),
+    storage: STORAGE,
+
+    _owned: PhantomData<OWNED>,
+    _shared: PhantomData<Box<SHARED>>,
 }
 
-enum SupercowData<'a, OWNED, BORROWED : 'a + ?Sized, SHARED> {
-    Owned(OWNED),
-    Borrowed(&'a BORROWED),
-    Shared(SHARED),
+enum SupercowMode {
+    Owned(*mut ()),
+    Borrowed,
+    Shared(*mut ()),
 }
-use self::SupercowData::*;
 
-impl<'a, OWNED, BORROWED : ?Sized, SHARED> Deref
-for Supercow<'a, OWNED, BORROWED, SHARED>
-where BORROWED : 'a,
-      &'a BORROWED : PointerFirstRef,
-      SHARED : ConstDeref<Target = BORROWED> {
-    type Target = BORROWED;
-    #[inline]
-    fn deref(&self) -> &BORROWED {
-        let self_address = self as *const Self as usize;
+use self::SupercowMode::*;
 
-        let mut target_ref = self.ptr_displacement;
-        unsafe {
-            let target_address: &mut usize = mem::transmute(&mut target_ref);
-            let nominal_address = *target_address;
-            *target_address = (self_address & self.ptr_mask) + nominal_address;
-        }
-        target_ref
+macro_rules! defimpl {
+    ($(@$us:tt)* [$($tparm:ident $(: ?$tparmsized:ident)*),*] ($($spec:tt)*)
+     where { $($wo:tt)* } $body:tt) => {
+        $($us)* impl<'a, $($tparm $(: ?$tparmsized)*,)* OWNED,
+             BORROWED : ?Sized, SHARED, STORAGE>
+            $($spec)* Supercow<'a, OWNED, BORROWED, SHARED, STORAGE>
+        where BORROWED : 'a,
+              &'a BORROWED : PointerFirstRef,
+              STORAGE : OwnedStorage<OWNED, SHARED>,
+              $($wo)*
+            $body
     }
 }
 
-impl<'a, OWNED, BORROWED : ?Sized, SHARED>
-Supercow<'a, OWNED, BORROWED, SHARED>
-where OWNED : Borrow<BORROWED>,
-      BORROWED : 'a,
-      &'a BORROWED : PointerFirstRef,
-      SHARED : ConstDeref<Target = BORROWED> {
+defimpl! {[] (Drop for) where { } {
+    fn drop(&mut self) {
+        match self.mode() {
+            Owned(ptr) => unsafe { self.storage.deallocate_a(ptr) },
+            Shared(ptr) => unsafe { self.storage.deallocate_b(ptr) },
+            Borrowed => (),
+        }
+    }
+} }
+
+defimpl! {@unsafe [] (Send for) where {
+    OWNED : Send,
+    SHARED : Send,
+    STORAGE : Send,
+} { } }
+
+defimpl! {@unsafe [] (Sync for) where {
+    OWNED : Sync,
+    SHARED : Sync,
+    STORAGE : Sync,
+} { } }
+
+defimpl! {[] () where { } {
     /// Creates a new `Supercow` which owns the given value.
     ///
     /// This can create a `Supercow` with a `'static` lifetime.
-    pub fn owned(inner: OWNED) -> Self {
-        Self::from_data(Owned(inner))
+    pub fn owned(inner: OWNED) -> Self
+    where OWNED : SafeBorrow<BORROWED> {
+        let mut this = unsafe { Self::empty() };
+        this.mode = this.storage.allocate_a(inner);
+        // This line could panic, but `this` doesn't have anything that would
+        // run destructors at this point other than `storage`, which was
+        // initialised in an ordinary way.
+        unsafe { this.borrow_owned(); }
+        this
     }
 
     /// Creates a new `Supercow` which borrows the given value.
     pub fn borrowed<T : Borrow<BORROWED> + ?Sized>(inner: &'a T) -> Self {
-        Self::from_data(Borrowed(inner.borrow()))
+        let mut this = unsafe { Self::empty() };
+        this.ptr = inner.borrow();
+        this
     }
 
     /// Creates a new `Supercow` using the given shared reference.
     ///
     /// The reference must be convertable to `SHARED` via `SharedFrom`.
     pub fn shared<T>(inner: T) -> Self
-    where SHARED : SharedFrom<T> {
-        Self::from_data(Shared(SHARED::shared_from(inner)))
+    where SHARED : SharedFrom<T> + ConstDeref<Target = BORROWED> {
+        Self::shared_nocvt(SHARED::shared_from(inner))
     }
 
-    fn from_data(data: SupercowData<'a, OWNED, BORROWED, SHARED>) -> Self {
-        let mut this = Supercow {
-            ptr_mask: 0,
-            ptr_displacement: unsafe { mem::uninitialized() },
-            state: data,
+    fn shared_nocvt(shared: SHARED) -> Self
+    where SHARED : ConstDeref<Target = BORROWED> {
+        let mut this = unsafe { Self::empty() };
+        this.ptr = unsafe {
+            &*(shared.const_deref() as *const BORROWED)
         };
-        this.set_ptr();
+
+        let nominal_mode = this.storage.allocate_b(shared);
+        this.mode = (1usize | (nominal_mode as usize)) as *mut ();
         this
     }
 
@@ -999,17 +1036,21 @@ where OWNED : Borrow<BORROWED>,
     /// let also_borrowed = Supercow::clone_non_owned(&borrowed).unwrap();
     /// ```
     pub fn clone_non_owned(this: &Self) -> Option<Self>
-    where SHARED : Clone {
-        match this.state {
+    where SHARED : Clone + ConstDeref<Target = BORROWED> {
+        match this.mode() {
             Owned(_) => None,
-            Borrowed(r) => Some(Supercow {
-                state: Borrowed(r),
-                .. *this
+
+            Borrowed => Some(Supercow {
+                ptr: this.ptr,
+                mode: this.mode,
+                storage: Default::default(),
+                _owned: PhantomData,
+                _shared: PhantomData,
             }),
-            Shared(ref r) => Some(Supercow {
-                state: Shared(r.clone()),
-                .. *this
-            }),
+
+            Shared(s) => Some(Self::shared_nocvt(unsafe {
+                this.storage.get_ptr_b(s)
+            }.clone())),
         }
     }
 
@@ -1042,119 +1083,136 @@ where OWNED : Borrow<BORROWED>,
     /// assert_eq!(None, Supercow::extract_ref(&shared));
     /// ```
     pub fn extract_ref(this: &Self) -> Option<&'a BORROWED> {
-        match this.state {
-            Borrowed(r) => Some(r),
+        match this.mode() {
+            Borrowed => Some(this.ptr),
             _ => None,
         }
     }
 
-    fn set_ptr(&mut self) {
+    /// Takes ownership of the underling value if needed, then returns it,
+    /// consuming `self`.
+    pub fn into_inner(mut this: Self) -> OWNED
+    where OWNED : Borrow<BORROWED>,
+          BORROWED : ToOwned<Owned = OWNED> {
+        match this.mode() {
+            Owned(ptr) => {
+                unsafe { this.storage.deallocate_into_a(ptr) }
+            },
+            _ => (*this).to_owned(),
+        }
+    }
+
+    /// Returns a (indirect) mutable reference to an underlying owned value.
+    ///
+    /// If this `Supercow` does not currently own the value, it takes
+    /// ownership. A `Ref` is then returned which allows accessing the mutable
+    /// owned value directly.
+    ///
+    /// ## Leak Safety
+    ///
+    /// If the returned `Ref` is released without its destructor being run, the
+    /// behaviour of the `Supercow` is unspecified (but does not result in
+    /// memory unsafety).
+    pub fn to_mut<'b>
+        (&'b mut self)
+         -> Ref<'a, 'b, OWNED, BORROWED, SHARED, STORAGE>
+    where OWNED : SafeBorrow<BORROWED>,
+          BORROWED : ToOwned<Owned = OWNED>,
+    {
+        // Become owned if not already.
+        match self.mode() {
+            Owned(_) => (),
+            _ => *self = Self::owned((*self).to_owned()),
+        }
+
+        // Clear out `ptr` if it points somewhere unstable
+        self.ptr = OWNED::borrow_replacement(self.ptr);
+
+        Ref {
+            r: unsafe { self.storage.get_mut_a(self.mode) } as *mut OWNED,
+            parent: self,
+        }
+    }
+
+    unsafe fn borrow_owned(&mut self)
+    where OWNED : SafeBorrow<BORROWED> {
+        // There's no safe way to propagate `borrowed_ptr` into
+        // `ptr` since the former has a borrow scoped to this
+        // function.
         {
-            let borrowed_ptr = match self.state {
-                Owned(ref r) => r.borrow(),
-                Borrowed(r) => r,
-                Shared(ref s) => s.const_deref(),
-            };
-            // There's no safe way to propagate `borrowed_ptr` into
-            // `ptr_displacement` since the former has a borrow scoped to this
-            // function.
-            unsafe {
-                let dst: &mut [u8] = slice::from_raw_parts_mut(
-                    &mut self.ptr_displacement as *mut&'a BORROWED
-                        as *mut u8,
-                    mem::size_of::<&'a BORROWED>());
-                let src: &[u8] = slice::from_raw_parts(
-                    &borrowed_ptr as *const&BORROWED as *const u8,
-                    mem::size_of::<&'a BORROWED>());
-                dst.copy_from_slice(src);
+            let borrowed_ptr = self.storage.get_ptr_a(self.mode).borrow();
+            self.ptr = &*(borrowed_ptr as *const BORROWED);
+        }
+
+        // Adjust the pointer if needed
+        if STORAGE::is_internal_storage() {
+            let self_start = self as *mut Self as usize;
+            let self_end = self_start + mem::size_of::<Self>();
+            let bias = self.relative_pointer_bias();
+
+            let ptr_address: &mut usize = mem::transmute(&mut self.ptr);
+
+            if *ptr_address >= self_start && *ptr_address < self_end {
+                debug_assert!(*ptr_address - self_start <
+                              MAX_INTERNAL_BORROW_DISPLACEMENT * 3/2,
+                              "Borrowed pointer displaced too far from \
+                               base address (supercow at {:x}, self at {:x}, \
+                               borrowed to {:x}", self_start,
+                              &self.storage as *const STORAGE as usize,
+                              *ptr_address);
+
+                *ptr_address -= self_start - bias;
             }
         }
-        self.adjust_ptr();
     }
 
-    fn adjust_ptr(&mut self) {
-        // Use relative addressing if `ptr` is inside `self` and absolute
-        // addressing otherwise.
-        //
-        // Ordinarily, `ptr` will always be inside `self` if the state is
-        // `Owned`, and outside otherwise. However, it is possible to create
-        // `Borrow` implementations that return arbitrary pointers, so we
-        // handle the two cases like self instead.
-        let self_start = self as *const Self as usize;
-        let self_end = self_start + mem::size_of::<Self>();
-        let addr: &mut usize = unsafe {
-            mem::transmute(&mut self.ptr_displacement)
-        };
-
-        if *addr >= self_start && *addr < self_end {
-            self.ptr_mask = !0;
-            *addr -= self_start;
-        } else {
-            self.ptr_mask = 0;
+    unsafe fn empty() -> Self {
+        Supercow {
+            ptr: mem::uninitialized(),
+            mode: ptr::null_mut(),
+            storage: Default::default(),
+            _owned: PhantomData,
+            _shared: PhantomData,
         }
     }
-}
 
-impl<'a, OWNED, BORROWED : ?Sized, SHARED> From<OWNED>
-for Supercow<'a, OWNED, BORROWED, SHARED>
-where OWNED : Borrow<BORROWED>,
-      BORROWED : 'a,
-      &'a BORROWED : PointerFirstRef,
-      SHARED : ConstDeref<Target = BORROWED> {
-    fn from(inner: OWNED) -> Self {
-        Self::from_data(SupercowData::Owned(inner))
+    fn mode(&self) -> SupercowMode {
+        if self.mode.is_null() {
+            Borrowed
+        } else if 0 == (self.mode as usize & 1) {
+            Owned(self.mode)
+        } else {
+            Shared((self.mode as usize & !1usize) as *mut ())
+        }
     }
-}
 
-// For now, we can't accept `&BORROWED` because it's theoretically possible for
-// someone to make `<BORROWED as ToOwned>::Owned = &BORROWED`, in which case
-// the `OWNED` version above would apply.
-//
-// Maybe once specialisation lands in stable, we can make `From` do what we
-// want everywhere.
-impl<'a, OWNED, BORROWED : ?Sized, SHARED> From<&'a OWNED>
-for Supercow<'a, OWNED, BORROWED, SHARED>
-where OWNED : Borrow<BORROWED>,
-      BORROWED : 'a,
-      &'a BORROWED : PointerFirstRef,
-      SHARED : ConstDeref<Target = BORROWED> {
-    fn from(inner: &'a OWNED) -> Self {
-        Self::from_data(SupercowData::Borrowed(inner.borrow()))
+    /// Returns the bias to use for relative pointers to avoid creating null
+    /// references.
+    ///
+    /// If rust lays this structure out such that `storage_address` is at the
+    /// base of `self`, returns 1. Otherwise, no bias is needed and it returns
+    /// 0.
+    #[inline(always)]
+    fn relative_pointer_bias(&self) -> usize {
+        let self_address = self as *const Self as usize;
+        let storage_address = &self.storage as *const STORAGE as usize;
+        if self_address == storage_address {
+            1
+        } else {
+            0
+        }
     }
-}
+} }
 
-// Similarly, we can't support arbitrary types here, and need to require
-// `BORROWED == OWNED` for `Rc` and `Arc`. Ideally, we'd support anything that
-// coerces into `SHARED`. Again, maybe one day after specialisation..
-impl<'a, OWNED, SHARED> From<Rc<OWNED>>
-for Supercow<'a, OWNED, OWNED, SHARED>
-where OWNED : 'a,
-      &'a OWNED : PointerFirstRef,
-      SHARED : ConstDeref<Target = OWNED>,
-      SHARED : SharedFrom<Rc<OWNED>> {
-    fn from(rc: Rc<OWNED>) -> Self {
-        Self::from_data(SupercowData::Shared(
-            SHARED::shared_from(rc)))
-    }
-}
-impl<'a, OWNED, SHARED> From<Arc<OWNED>>
-for Supercow<'a, OWNED, OWNED, SHARED>
-where OWNED : 'a,
-      &'a OWNED : PointerFirstRef,
-      SHARED : ConstDeref<Target = OWNED>,
-      SHARED : SharedFrom<Arc<OWNED>> {
-    fn from(rc: Arc<OWNED>) -> Self {
-        Self::from_data(SupercowData::Shared(
-            SHARED::shared_from(rc)))
-    }
-}
-
-impl<'a, OWNED, BORROWED : ?Sized, SHARED>
-Supercow<'a, OWNED, BORROWED, SHARED>
-where OWNED : Borrow<BORROWED>,
+// Separate `impl` as rustc doesn't seem to like having multiple `&'x Type`
+// constraints in one place.
+impl<'a, OWNED, BORROWED : ?Sized, SHARED, STORAGE>
+Supercow<'a, OWNED, BORROWED, SHARED, STORAGE>
+where OWNED : SafeBorrow<BORROWED>,
       BORROWED : 'a + ToOwned<Owned = OWNED>,
       for<'l> &'l BORROWED : PointerFirstRef,
-      SHARED : ConstDeref<Target = BORROWED> {
+      SHARED : ConstDeref<Target = BORROWED>,
+      STORAGE : OwnedStorage<OWNED, SHARED> {
     /// Takes ownership of the underlying value, so that this `Supercow` has a
     /// `'static` lifetime.
     ///
@@ -1180,103 +1238,48 @@ where OWNED : Borrow<BORROWED>,
     /// assert_eq!(42, *s);
     /// ```
     pub fn take_ownership<NS : ConstDeref<Target = BORROWED>>
-        (this: Self)
-         -> Supercow<'static, OWNED, BORROWED, NS>
-    {
-        match this.state {
-            Owned(o) => Supercow {
-                ptr_mask: this.ptr_mask,
-                ptr_displacement: unsafe {
-                    &*(this.ptr_displacement as *const BORROWED)
-                },
-                state: Owned(o),
+        (mut this: Self) -> Supercow<'static, OWNED, BORROWED, NS, STORAGE>
+    where STORAGE : OwnedStorage<OWNED, NS> {
+        let static_ptr: &'static BORROWED =
+            unsafe { &*(this.ptr as *const BORROWED) };
+
+        match this.mode() {
+            Owned(_) => Supercow {
+                ptr: static_ptr,
+                mode: this.mode,
+                storage: mem::replace(&mut this.storage, Default::default()),
+                _owned: PhantomData,
+                _shared: PhantomData,
             },
-            Borrowed(r) => Supercow::owned(r.to_owned()),
-            Shared(ref s) => Supercow::owned(s.const_deref().to_owned()),
+
+            _ => Supercow::owned((*this).to_owned()),
         }
-    }
-}
-
-impl<'a, OWNED, BORROWED : ?Sized, SHARED>
-Supercow<'a, OWNED, BORROWED, SHARED>
-where OWNED : Borrow<BORROWED>,
-      BORROWED : 'a + ToOwned<Owned = OWNED>,
-      &'a BORROWED : PointerFirstRef,
-      SHARED : ConstDeref<Target = BORROWED> {
-    /// Takes ownership of the underling value if needed, then returns it,
-    /// consuming `self`.
-    pub fn into_inner(this: Self) -> OWNED {
-        match this.state {
-            Owned(o) => o,
-            Borrowed(r) => r.to_owned(),
-            Shared(ref s) => s.const_deref().to_owned(),
-        }
-    }
-}
-
-impl<'a, OWNED, BORROWED : ?Sized, SHARED>
-Supercow<'a, OWNED, BORROWED, SHARED>
-where OWNED : SafeBorrow<BORROWED>,
-      BORROWED : 'a + ToOwned<Owned = OWNED>,
-      &'a BORROWED : PointerFirstRef,
-      SHARED : ConstDeref<Target = BORROWED> {
-    /// Returns a (indirect) mutable reference to an underlying owned value.
-    ///
-    /// If this `Supercow` does not currently own the value, it takes
-    /// ownership. A `Ref` is then returned which allows accessing the mutable
-    /// owned value directly.
-    ///
-    /// ## Leak Safety
-    ///
-    /// If the returned `Ref` is released without its destructor being run, the
-    /// behaviour of the `Supercow` is unspecified (but does not result in
-    /// memory unsafety).
-    pub fn to_mut<'b>(&'b mut self) -> Ref<'a, 'b, OWNED, BORROWED, SHARED> {
-        // Take ownership if we do not already have it
-        let new = match self.state {
-            Owned(_) => None,
-            Borrowed(r) => Some(Self::owned(r.to_owned())),
-            Shared(ref s) => Some(Self::owned(s.const_deref().to_owned())),
-        };
-        if let Some(new) = new {
-            *self = new;
-        }
-
-        let r = match self.state {
-            Owned(ref mut r) => r as *mut OWNED,
-            _ => unreachable!(),
-        };
-        // Because mutating the owned value could invalidate the calculated
-        // pointer we have, reset it to something that won't change, and then
-        // recalculate it when the `Ref` is dropped.
-        self.ptr_displacement =
-            OWNED::borrow_replacement(self.ptr_displacement);
-        self.adjust_ptr();
-
-        Ref { r: r, parent: self }
     }
 }
 
 /// Provides mutable access to an owned value within a `Supercow`.
 ///
 /// This is similar to the `Ref` used with `RefCell`.
-pub struct Ref<'a, 'b, OWNED, BORROWED : ?Sized, SHARED>
+pub struct Ref<'a, 'b, OWNED, BORROWED : ?Sized, SHARED, STORAGE>
 where 'a: 'b,
-      OWNED : 'b + SafeBorrow<BORROWED>,
+      OWNED : SafeBorrow<BORROWED> + 'b,
       BORROWED : 'a,
       &'a BORROWED : PointerFirstRef,
-      SHARED : 'b + ConstDeref<Target = BORROWED> {
+      SHARED : 'b,
+      STORAGE : OwnedStorage<OWNED, SHARED> + 'b {
     r: *mut OWNED,
-    parent: &'b mut Supercow<'a, OWNED, BORROWED, SHARED>,
+    parent: &'b mut Supercow<'a, OWNED, BORROWED, SHARED, STORAGE>,
 }
 
-impl<'a, 'b, OWNED, BORROWED : ?Sized, SHARED> Deref
-for Ref<'a, 'b, OWNED, BORROWED, SHARED>
+
+impl<'a, 'b, OWNED, BORROWED : ?Sized, SHARED, STORAGE> Deref
+for Ref<'a, 'b, OWNED, BORROWED, SHARED, STORAGE>
 where 'a: 'b,
-      OWNED : 'b + SafeBorrow<BORROWED>,
+      OWNED : SafeBorrow<BORROWED> + 'b,
       BORROWED : 'a,
       &'a BORROWED : PointerFirstRef,
-      SHARED : 'b + ConstDeref<Target = BORROWED> {
+      SHARED : 'b,
+      STORAGE : OwnedStorage<OWNED, SHARED> + 'b {
     type Target = OWNED;
 
     #[inline]
@@ -1285,66 +1288,151 @@ where 'a: 'b,
     }
 }
 
-impl<'a, 'b, OWNED, BORROWED : ?Sized, SHARED> DerefMut
-for Ref<'a, 'b, OWNED, BORROWED, SHARED>
+impl<'a, 'b, OWNED, BORROWED : ?Sized, SHARED, STORAGE> DerefMut
+for Ref<'a, 'b, OWNED, BORROWED, SHARED, STORAGE>
 where 'a: 'b,
-      OWNED : 'b + SafeBorrow<BORROWED>,
+      OWNED : SafeBorrow<BORROWED> + 'b,
       BORROWED : 'a,
       &'a BORROWED : PointerFirstRef,
-      SHARED : 'b + ConstDeref<Target = BORROWED> {
+      SHARED : 'b,
+      STORAGE : OwnedStorage<OWNED, SHARED> + 'b {
     #[inline]
     fn deref_mut(&mut self) -> &mut OWNED {
         unsafe { &mut*self.r }
     }
 }
 
-impl<'a, 'b, OWNED, BORROWED : ?Sized, SHARED> Drop
-for Ref<'a, 'b, OWNED, BORROWED, SHARED>
+impl<'a, 'b, OWNED, BORROWED : ?Sized, SHARED, STORAGE> Drop
+for Ref<'a, 'b, OWNED, BORROWED, SHARED, STORAGE>
 where 'a: 'b,
-      OWNED : 'b + SafeBorrow<BORROWED>,
+      OWNED : SafeBorrow<BORROWED> + 'b,
       BORROWED : 'a,
       &'a BORROWED : PointerFirstRef,
-      SHARED : 'b + ConstDeref<Target = BORROWED> {
+      SHARED : 'b,
+      STORAGE : OwnedStorage<OWNED, SHARED> + 'b {
     #[inline]
     fn drop(&mut self) {
         // The value of `OWNED::borrow()` may have changed, so recompute
         // everything instead of backing the old values up.
-        self.parent.set_ptr()
+        unsafe { self.parent.borrow_owned() }
     }
 }
 
-impl<'a, OWNED, BORROWED : ?Sized, SHARED> Clone
-for Supercow<'a, OWNED, BORROWED, SHARED>
-where OWNED : Clone,
-      BORROWED : 'a,
-      &'a BORROWED : PointerFirstRef,
-      SHARED : Clone + ConstDeref<Target = BORROWED> {
+defimpl! {[] (Deref for) where { } {
+    type Target = BORROWED;
+    #[inline]
+    fn deref(&self) -> &BORROWED {
+        let self_address = self as *const Self as usize;
+
+        let mut target_ref = self.ptr;
+        unsafe {
+            let target_address: &mut usize = mem::transmute(&mut target_ref);
+            let nominal_address = *target_address;
+            if STORAGE::is_internal_storage() &&
+                nominal_address < MAX_INTERNAL_BORROW_DISPLACEMENT
+            {
+                *target_address = nominal_address + self_address -
+                    self.relative_pointer_bias();
+            }
+        }
+        target_ref
+    }
+} }
+
+defimpl! {[] (Borrow<BORROWED> for) where { } {
+    fn borrow(&self) -> &BORROWED {
+        self.deref()
+    }
+} }
+
+defimpl! {[] (AsRef<BORROWED> for) where { } {
+    fn as_ref(&self) -> &BORROWED {
+        self.deref()
+    }
+} }
+
+defimpl! {[] (Clone for) where {
+    OWNED : Clone + SafeBorrow<BORROWED>,
+    SHARED : Clone + ConstDeref<Target = BORROWED>,
+} {
     fn clone(&self) -> Self {
-        Supercow {
-            ptr_mask: self.ptr_mask,
-            ptr_displacement: self.ptr_displacement,
-            state: match self.state {
-                Owned(ref o) => Owned(o.clone()),
-                Borrowed(r) => Borrowed(r),
-                Shared(ref s) => Shared(s.clone()),
-            }
+        match self.mode() {
+            Owned(ptr) => Self::owned(unsafe {
+                self.storage.get_ptr_a(ptr)
+            }.clone()),
+
+            Borrowed => Supercow {
+                ptr: self.ptr,
+                mode: self.mode,
+                storage: Default::default(),
+                _owned: PhantomData,
+                _shared: PhantomData,
+            },
+
+            Shared(s) => Self::shared_nocvt(unsafe {
+                self.storage.get_ptr_b(s)
+            }.clone()),
         }
+    }
+} }
+
+defimpl! {[] (From<OWNED> for) where {
+    OWNED : SafeBorrow<BORROWED>,
+} {
+    fn from(inner: OWNED) -> Self {
+        Self::owned(inner)
+    }
+} }
+
+// For now, we can't accept `&BORROWED` because it's theoretically possible for
+// someone to make `<BORROWED as ToOwned>::Owned = &BORROWED`, in which case
+// the `OWNED` version above would apply.
+//
+// Maybe once specialisation lands in stable, we can make `From` do what we
+// want everywhere.
+defimpl! {[] (From<&'a OWNED> for) where {
+    // Does not need to be `SafeBorrow` since it's not embedded inside us.
+    OWNED : Borrow<BORROWED>,
+} {
+    fn from(inner: &'a OWNED) -> Self {
+        Self::borrowed(inner.borrow())
+    }
+} }
+
+// Similarly, we can't support arbitrary types here, and need to require
+// `BORROWED == OWNED` for `Rc` and `Arc`. Ideally, we'd support anything that
+// coerces into `SHARED`. Again, maybe one day after specialisation..
+impl<'a, OWNED, SHARED, STORAGE> From<Rc<OWNED>>
+for Supercow<'a, OWNED, OWNED, SHARED, STORAGE>
+where SHARED : ConstDeref<Target = OWNED> + SharedFrom<Rc<OWNED>>,
+      STORAGE : OwnedStorage<OWNED, SHARED>,
+      OWNED : 'a,
+      &'a OWNED : PointerFirstRef {
+    fn from(rc: Rc<OWNED>) -> Self {
+        Self::shared(rc)
+    }
+}
+impl<'a, OWNED, SHARED, STORAGE> From<Arc<OWNED>>
+for Supercow<'a, OWNED, OWNED, SHARED, STORAGE>
+where SHARED : ConstDeref<Target = OWNED> + SharedFrom<Arc<OWNED>>,
+      STORAGE : OwnedStorage<OWNED, SHARED>,
+      OWNED : 'a,
+      &'a OWNED : PointerFirstRef {
+    fn from(rc: Arc<OWNED>) -> Self {
+        Self::shared(rc)
     }
 }
 
-macro_rules! deleg_fmt {
-    ($tr:ident) => {
-        impl<'a, OWNED, BORROWED : ?Sized, SHARED> fmt::$tr
-        for Supercow<'a, OWNED, BORROWED, SHARED>
-        where BORROWED : 'a + fmt::$tr,
-              &'a BORROWED : PointerFirstRef,
-              SHARED : ConstDeref<Target = BORROWED> {
-            fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-                (**self).fmt(f)
-            }
+macro_rules! deleg_fmt { ($tr:ident) => {
+    defimpl! {[] (fmt::$tr for) where {
+        BORROWED : fmt::$tr
+    } {
+        fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+            (**self).fmt(f)
         }
-    }
-}
+    } }
+} }
+
 deleg_fmt!(Binary);
 deleg_fmt!(Debug);
 deleg_fmt!(Display);
@@ -1355,12 +1443,10 @@ deleg_fmt!(Pointer);
 deleg_fmt!(UpperExp);
 deleg_fmt!(UpperHex);
 
-impl<'a, OWNED, BORROWED : ?Sized, SHARED, T> cmp::PartialEq<T>
-for Supercow<'a, OWNED, BORROWED, SHARED>
-where T : Borrow<BORROWED>,
-      BORROWED : 'a + PartialEq<BORROWED>,
-      &'a BORROWED : PointerFirstRef,
-      SHARED : ConstDeref<Target = BORROWED> {
+defimpl! {[T] (cmp::PartialEq<T> for) where {
+    T : Borrow<BORROWED>,
+    BORROWED : PartialEq<BORROWED>,
+} {
     fn eq(&self, other: &T) -> bool {
         **self == *other.borrow()
     }
@@ -1368,20 +1454,16 @@ where T : Borrow<BORROWED>,
     fn ne(&self, other: &T) -> bool {
         **self != *other.borrow()
     }
-}
+} }
 
-impl<'a, OWNED, BORROWED : ?Sized, SHARED> cmp::Eq
-for Supercow<'a, OWNED, BORROWED, SHARED>
-where BORROWED : 'a + Eq,
-      &'a BORROWED : PointerFirstRef,
-      SHARED : ConstDeref<Target = BORROWED> { }
+defimpl! {[] (cmp::Eq for) where {
+    BORROWED : Eq
+} { } }
 
-impl<'a, OWNED, BORROWED : ?Sized, SHARED, T> cmp::PartialOrd<T>
-for Supercow<'a, OWNED, BORROWED, SHARED>
-where T : Borrow<BORROWED>,
-      BORROWED : 'a + PartialOrd<BORROWED>,
-      &'a BORROWED : PointerFirstRef,
-      SHARED : ConstDeref<Target = BORROWED> {
+defimpl! {[T] (cmp::PartialOrd<T> for) where {
+    T : Borrow<BORROWED>,
+    BORROWED : cmp::PartialOrd<BORROWED>,
+} {
     fn partial_cmp(&self, other: &T) -> Option<cmp::Ordering> {
         (**self).partial_cmp(other.borrow())
     }
@@ -1401,51 +1483,56 @@ where T : Borrow<BORROWED>,
     fn ge(&self, other: &T) -> bool {
         **self >= *other.borrow()
     }
-}
+} }
 
-impl<'a, OWNED, BORROWED : ?Sized, SHARED> cmp::Ord
-for Supercow<'a, OWNED, BORROWED, SHARED>
-where BORROWED : 'a + cmp::Ord,
-      &'a BORROWED : PointerFirstRef,
-      SHARED : ConstDeref<Target = BORROWED> {
+defimpl! {[] (cmp::Ord for) where {
+    BORROWED : cmp::Ord
+} {
     fn cmp(&self, other: &Self) -> cmp::Ordering {
         (**self).cmp(other)
     }
-}
+} }
 
-impl<'a, OWNED, BORROWED : ?Sized, SHARED> Hash
-for Supercow<'a, OWNED, BORROWED, SHARED>
-where BORROWED : 'a + Hash,
-      &'a BORROWED : PointerFirstRef,
-      SHARED : ConstDeref<Target = BORROWED> {
+defimpl! {[] (Hash for) where {
+    BORROWED : Hash
+} {
     fn hash<H : Hasher>(&self, h: &mut H) {
         (**self).hash(h)
     }
-}
-
-impl<'a, OWNED, BORROWED : ?Sized, SHARED> Borrow<BORROWED>
-for Supercow<'a, OWNED, BORROWED, SHARED>
-where BORROWED : 'a,
-      &'a BORROWED : PointerFirstRef,
-      SHARED : ConstDeref<Target = BORROWED> {
-    fn borrow(&self) -> &BORROWED {
-        self.deref()
-    }
-}
-
-impl<'a, OWNED, BORROWED : ?Sized, SHARED> AsRef<BORROWED>
-for Supercow<'a, OWNED, BORROWED, SHARED>
-where BORROWED : 'a,
-      &'a BORROWED : PointerFirstRef,
-      SHARED : ConstDeref<Target = BORROWED> {
-    fn as_ref(&self) -> &BORROWED {
-        self.deref()
-    }
-}
+} }
 
 #[cfg(test)]
-mod test {
+mod misc_tests {
     use std::borrow::Cow;
+
+    use super::*;
+
+    // This is where the asm in the Performance Notes section comes from.
+    #[inline(never)]
+    fn add_two_cow(a: &Cow<u32>, b: &Cow<u32>) -> u32 {
+        **a + **b
+    }
+
+    #[inline(never)]
+    fn add_two_supercow(a: &InlineSupercow<u32>,
+                        b: &InlineSupercow<u32>) -> u32 {
+        **a + **b
+    }
+
+    #[test]
+    fn do_add_two() {
+        // Need to call `add_two_cow` twice to prevent LLVM from specialising
+        // it.
+        assert_eq!(42, add_two_cow(&Cow::Owned(40), &Cow::Owned(2)));
+        assert_eq!(44, add_two_cow(&Cow::Borrowed(&38), &Cow::Borrowed(&6)));
+        assert_eq!(42, add_two_supercow(&Supercow::owned(40),
+                                        &Supercow::owned(2)));
+    }
+}
+
+macro_rules! tests { ($modname:ident, $stype:ident) => {
+#[cfg(test)]
+mod $modname {
     use std::sync::Arc;
 
     use super::*;
@@ -1453,7 +1540,7 @@ mod test {
     #[test]
     fn ref_to_owned() {
         let x = 42u32;
-        let a: Supercow<u32> = Supercow::borrowed(&x);
+        let a: $stype<u32> = Supercow::borrowed(&x);
         assert_eq!(x, *a);
         assert_eq!(&x as *const u32 as usize,
                    (&*a) as *const u32 as usize);
@@ -1473,8 +1560,8 @@ mod test {
 
     #[test]
     fn supports_dst() {
-        let a: Supercow<String, str> = Supercow::borrowed("hello");
-        let b: Supercow<String, str> = Supercow::owned("hello".to_owned());
+        let a: $stype<String, str> = Supercow::borrowed("hello");
+        let b: $stype<String, str> = Supercow::owned("hello".to_owned());
         assert_eq!(a, b);
 
         let mut c = a.clone();
@@ -1485,13 +1572,13 @@ mod test {
 
     #[test]
     fn default_accepts_arc() {
-        let x: Supercow<u32> = Supercow::shared(Arc::new(42u32));
+        let x: $stype<u32> = Supercow::shared(Arc::new(42u32));
         assert_eq!(42, *x);
     }
 
     #[test]
     fn ref_safe_even_if_forgotten() {
-        let mut x: Supercow<String, str> = Supercow::owned("foo".to_owned());
+        let mut x: $stype<String, str> = Supercow::owned("foo".to_owned());
         {
             let mut m = x.to_mut();
             // Add a bunch of characters to invalidate the allocation
@@ -1511,9 +1598,11 @@ mod test {
     }
 
     #[test]
+    // `SipHasher` is deprecated, but its replacement `DefaultHasher` doesn't
+    // exist in Rust 1.12.1.
+    #[allow(deprecated)]
     fn general_trait_delegs_work() {
         use std::borrow::Borrow;
-        use std::collections::hash_map::DefaultHasher;
         use std::convert::AsRef;
         use std::cmp::*;
         use std::hash::*;
@@ -1524,7 +1613,7 @@ mod test {
             }
         }
 
-        let x: Supercow<u32> = Supercow::owned(42u32);
+        let x: $stype<u32> = Supercow::owned(42u32);
         test_fmt!("{}", x);
         test_fmt!("{:?}", x);
         test_fmt!("{:o}", x);
@@ -1541,9 +1630,9 @@ mod test {
         assert_eq!(42.partial_cmp(&43), x.partial_cmp(&43));
         assert_eq!(42.cmp(&43), x.cmp(&Supercow::owned(43)));
 
-        let mut expected_hash = DefaultHasher::new();
+        let mut expected_hash = SipHasher::new();
         42u32.hash(&mut expected_hash);
-        let mut actual_hash = DefaultHasher::new();
+        let mut actual_hash = SipHasher::new();
         x.hash(&mut actual_hash);
         assert_eq!(expected_hash.finish(), actual_hash.finish());
 
@@ -1557,7 +1646,7 @@ mod test {
         // about which one will eventually be chosen, and so one of the values
         // is guaranteed to eventually be moved off the heap onto the stack.
         #[inline(never)]
-        fn pick_one() -> Supercow<'static, String> {
+        fn pick_one() -> $stype<'static, String> {
             use std::collections::HashMap;
 
             let mut hm = HashMap::new();
@@ -1573,7 +1662,7 @@ mod test {
 
     #[test]
     fn dst_string_str() {
-        let mut s: Supercow<'static, String, str> = String::new().into();
+        let mut s: $stype<'static, String, str> = String::new().into();
         let mut expected = String::new();
         for i in 0..1024 {
             assert_eq!(expected.as_str(), &*s);
@@ -1585,7 +1674,7 @@ mod test {
 
     #[test]
     fn dst_vec_u8s() {
-        let mut s: Supercow<'static, Vec<u8>, [u8]> = Vec::new().into();
+        let mut s: $stype<'static, Vec<u8>, [u8]> = Vec::new().into();
         let mut expected = Vec::<u8>::new();
         for i in 0..1024 {
             assert_eq!(&expected[..], &*s);
@@ -1599,7 +1688,7 @@ mod test {
     fn dst_osstring_osstr() {
         use std::ffi::{OsStr, OsString};
 
-        let mut s: Supercow<'static, OsString, OsStr> = OsString::new().into();
+        let mut s: $stype<'static, OsString, OsStr> = OsString::new().into();
         let mut expected = OsString::new();
         for i in 0..1024 {
             assert_eq!(expected.as_os_str(), &*s);
@@ -1615,7 +1704,7 @@ mod test {
         use std::mem;
         use std::ops::Deref;
 
-        let mut s: Supercow<'static, CString, CStr> =
+        let mut s: $stype<'static, CString, CStr> =
             CString::new("").unwrap().into();
         let mut expected = CString::new("").unwrap();
         for i in 0..1024 {
@@ -1648,7 +1737,7 @@ mod test {
     fn dst_pathbuf_path() {
         use std::path::{Path, PathBuf};
 
-        let mut s: Supercow<'static, PathBuf, Path> = PathBuf::new().into();
+        let mut s: $stype<'static, PathBuf, Path> = PathBuf::new().into();
         let mut expected = PathBuf::new();
         for i in 0..1024 {
             assert_eq!(expected.as_path(), &*s);
@@ -1657,26 +1746,9 @@ mod test {
             assert_eq!(expected.as_path(), &*s);
         }
     }
+} } }
 
-    // This is where the asm in the Performance Notes section comes from.
-
-    #[inline(never)]
-    fn add_two_cow(a: &Cow<u32>, b: &Cow<u32>) -> u32 {
-        **a + **b
-    }
-
-    #[inline(never)]
-    fn add_two_supercow(a: &Supercow<u32>, b: &Supercow<u32>) -> u32 {
-        **a + **b
-    }
-
-    #[test]
-    fn do_add_two() {
-        // Need to call `add_two_cow` twice to prevent LLVM from specialising
-        // it.
-        assert_eq!(42, add_two_cow(&Cow::Owned(40), &Cow::Owned(2)));
-        assert_eq!(44, add_two_cow(&Cow::Borrowed(&38), &Cow::Borrowed(&6)));
-        assert_eq!(42, add_two_supercow(&Supercow::owned(40),
-                                        &Supercow::owned(2)));
-    }
-}
+tests!(inline_sync_tests, InlineSupercow);
+tests!(inline_nonsync_tests, InlineNonSyncSupercow);
+tests!(boxed_sync_tests, Supercow);
+tests!(boxed_nonsync_tests, NonSyncSupercow);
