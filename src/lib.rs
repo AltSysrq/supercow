@@ -1183,7 +1183,9 @@ defimpl! {[] (Deref for) where { } {
         unsafe {
             let target_address: &mut usize = mem::transmute(&mut target_ref);
             let nominal_address = *target_address;
-            if nominal_address < MAX_INTERNAL_BORROW_DISPLACEMENT {
+            if STORAGE::is_internal_storage() &&
+                nominal_address < MAX_INTERNAL_BORROW_DISPLACEMENT
+            {
                 *target_address = nominal_address + self_address -
                     self.relative_pointer_bias();
             }
