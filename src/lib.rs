@@ -147,17 +147,18 @@
 //! makes the `Deref` implementation faster since it does not need to account
 //! for internal pointers, but more importantly, means that the `Supercow` does
 //! not need to reserve space for the owned and shared values, so the default
-//! `Supercow` is only one pointer wider than a bare reference. (Note that if
-//! you are looking to eliminate allocation entirely, you will also need to
-//! tinker with the `SHARED` type, which by default has its own `Box` as well.)
+//! `Supercow` is only one pointer wider than a bare reference.
 //!
 //! The obvious problem with boxing values is that it makes construction of the
 //! `Supercow` slower, as one must pay for an allocation. If you want to avoid
 //! the allocation, you can use the `Inline` variants instead, which store the
-//! values inline inside the `Supercow`. Note that this of course makes the
-//! `Supercow` much bigger; be particularly careful if you create a hierarchy
-//! of things containing `InlineSupercow`s referencing each other, as each
-//! would effectively have space for the entire tree above it inline.
+//! values inline inside the `Supercow`. (Note that if you are looking to
+//! eliminate allocation entirely, you will also need to tinker with the
+//! `SHARED` type, which by default has its own `Box` as well.) Note that this
+//! of course makes the `Supercow` much bigger; be particularly careful if you
+//! create a hierarchy of things containing `InlineSupercow`s referencing each
+//! other, as each would effectively have space for the entire tree above it
+//! inline.
 //!
 //! The default to box values was chosen on the grounds that it is generally
 //! easier to use, less likely to cause confusing problems, and in many cases
@@ -213,7 +214,7 @@
 //! natural representation may be to make the table handle hold a reference to
 //! the database handle.
 //!
-//! ```norun
+//! ```no_run
 //! struct Database;
 //! impl Database {
 //!   fn new() -> Self {
