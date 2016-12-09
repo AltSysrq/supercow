@@ -328,7 +328,8 @@ unsafe impl<A, B> OwnedStorage<A, B> for InlineStorage<A, B> {
     fn is_internal_storage() -> bool { true }
 }
 
-/// Causes the `OWNED` value of a `Supercow` to be stored in a `Box`.
+/// Causes the `OWNED` or `SHARED` value of a `Supercow` to be stored in a
+/// `Box`.
 ///
 /// This makes allocation of owned `Supercow`s more expensive, but incurs zero
 /// space overhead within the `Supercow`. It also results in a faster `Deref`

@@ -120,6 +120,68 @@
 //! }
 //! ```
 //!
+//! ## Chosing the right variant
+//!
+//! `Supercow` is extremely flexible as to how it internally stores and manages
+//! data. There are four variants provided by default: `Supercow`,
+//! `NonSyncSupercow`, `InlineSupercow`, and `InlineNonSyncSupercow`. Here is a
+//! quick reference on the trade-offs:
+//!
+//! | Variant           | Send+Sync?    | `Rc`? | Size  | Init  | Deref      |
+//! |-------------------|---------------|-------|-------|-------|------------|
+//! | (Default)         | Yes           | No    | Small | Slow  | Very Fast  |
+//! | `NonSync`         | No            | Yes   | Small | Slow  | Very Fast  |
+//! | `Inline`          | Yes           | No    | Big   | Fast  | Fast       |
+//! | `InlineNonSync`   | No            | Yes   | Big   | Fast  | Fast       |
+//!
+//! "Init" above specifically refers to initialisation with an owned value or
+//! shared reference. Supercows constructed with mundane references always
+//! construct extremely quickly.
+//!
+//! The only difference between the `NonSync` variant and the default is that
+//! the default is to require the shared pointer type (eg, `Arc`) to be `Send`
+//! and `Sync` (which thus prohibits using `Rc`), whereas `NonSync` does not
+//! and so allows `Rc`.
+//!
+//! By default, `Supercow` boxes any owned value or shared reference. This
+//! makes the `Deref` implementation faster since it does not need to account
+//! for internal pointers, but more importantly, means that the `Supercow` does
+//! not need to reserve space for the owned and shared values, so the default
+//! `Supercow` is only one pointer wider than a bare reference. (Note that if
+//! you are looking to eliminate allocation entirely, you will also need to
+//! tinker with the `SHARED` type, which by default has its own `Box` as well.)
+//!
+//! The obvious problem with boxing values is that it makes construction of the
+//! `Supercow` slower, as one must pay for an allocation. If you want to avoid
+//! the allocation, you can use the `Inline` variants instead, which store the
+//! values inline inside the `Supercow`. Note that this of course makes the
+//! `Supercow` much bigger; be particularly careful if you create a hierarchy
+//! of things containing `InlineSupercow`s referencing each other, as each
+//! would effectively have space for the entire tree above it inline.
+//!
+//! The default to box values was chosen on the grounds that it is generally
+//! easier to use, less likely to cause confusing problems, and in many cases
+//! the allocation doesn't affect performance:
+//!
+//! - In either choice, creating a `Supercow` with a borrowed reference incurs
+//! no allocation. The boxed option will actually be slightly faster since it
+//! does not need to initialise as much memory and results in better locality
+//! due to being smaller.
+//!
+//! - The value contained usually is reasonably expensive to construct anyway,
+//! or else there would be less incentive to pass it around as a reference when
+//! possible. In these cases, the extra allocation likely is a minor impact on
+//! performance.
+//!
+//! - Overuse of boxed values results in a "uniform slowness" that can be
+//! identified reasonably easily, and results in a linear performance
+//! degradation relative to overuse. Overuse of `InlineSupercow`s at best
+//! results in linear memory bloat, but if `InlineSupercow`s reference
+//! structures containing other `InlineSupercow`s, the result can even be
+//! exponential bloat to the structures. At best, this is a harder problem to
+//! track down; at worst, it can result in entirely non-obvious stack
+//! overflows.
+//!
 //! # Use Cases
 //!
 //! ## More flexible Copy-on-Write
@@ -358,9 +420,10 @@
 //! The third type parameter type to `Supercow` specifies the shared reference
 //! type.
 //!
-//! The default is `DefaultFeatures<'static>`, which is a boxed trait object
-//! describing the features a shared reference type must have while allowing
-//! any such reference to be used without needing a generic type argument.
+//! The default is `Box<DefaultFeatures<'static>>`, which is a boxed trait
+//! object describing the features a shared reference type must have while
+//! allowing any such reference to be used without needing a generic type
+//! argument.
 //!
 //! An alternate feature set can be found in `NonSyncFeatures`, which is also
 //! usable through the `NonSyncSupercow` typedef (which also makes it
@@ -412,6 +475,27 @@
 //! different types, `Supercow::shared()` will be needed to construct the
 //! `Supercow` explicitly.
 //!
+//! # Storage Type
+//!
+//! When in owned or shared mode, a `Supercow` needs someplace to store the
+//! `OWNED` or `SHARED` value itself. This can be customised with the fourth
+//! type parameter and the `OwnedStorage` trait. Two strategies are provided by
+//! this crate:
+//!
+//! - `BoxedStorage` puts everything behind `Box`es. This has the advantage
+//! that the `Supercow` structure is only one pointer wider than a basic
+//! reference, and results in a faster `Deref`. The obvious drawback is that
+//! you pay for allocations on construction. This is the default with
+//! `Supercow` and `NonSyncSupercow`.
+//!
+//! - `InlineStorage` uses an `enum` to store the values inline in the
+//! `Supercow`, thus incurring no allocation, but making the `Supercow` itself
+//! bigger. This is easily available via the `InlineSupercow` and
+//! `InlineNonSyncSupercow` types.
+//!
+//! If you find some need, you can define custom storage types, though note
+//! that the trait is quite unsafe and somewhat subtle.
+//!
 //! # Advanced
 //!
 //! ## Variance
@@ -427,11 +511,15 @@
 //! use supercow::Supercow;
 //!
 //! fn assert_covariance<'a, 'b: 'a>(
-//!   one: Supercow<'b, &'b u32, &'b u32, Rc<&'b u32>>,
-//!   two: Supercow<'b, u32>)
+//!   imm: Supercow<'b, u32>,
+//!   bor: &'b Supercow<'b, u32>)
 //! {
-//!   let _one_a: Supercow<'a, &'a u32, &'a u32, Rc<&'a u32>> = one;
-//!   let _two_a: Supercow<'a, u32> = two;
+//!   let _imm_a: Supercow<'a, u32> = imm;
+//!   let _bor_aa: &'a Supercow<'a, u32> = bor;
+//!   let _bor_ab: &'a Supercow<'b, u32> = bor;
+//!   // Invalid, since the external `&'b` reference is declared to live longer
+//!   // than the internal `&'a` reference.
+//!   // let _bor_ba: &'b Supercow<'a, u32> = bor;
 //! }
 //!
 //! # fn main() { }
@@ -460,16 +548,18 @@
 //! compile-time to run-time, `Supercow` is obviously not as fast as using an
 //! owned value directly or a reference directly.
 //!
-//! Constructing a `Supercow` with an owned object or a simple reference is
-//! reasonably fast, but does incur a small amount of overhead for the pointer
-//! displacement to be set up.
+//! Constructing any kind of `Supercow` with a normal reference is very fast,
+//! only requiring a bit of internal memory initialisation besides setting the
+//! reference itself.
 //!
-//! The default `Supercow` shared reference type boxes the reference, incurring
-//! an allocation as well as virtual dispatch on certain operations. This is
-//! obviously much more expensive than the other options, though note that the
-//! allocation is only incurred when constructing the `Supercow`, so this is
-//! inconsequential in a create-once-use-many case. Use of a concrete shared
-//! reference type alleviates this issue.
+//! The defual `Supercow` type boxes the owned type and double-boxes the shared
+//! type. This obviously dominates construction cost in those cases.
+//!
+//! `InlineSupercow` eliminates one box layer. This means that constructing an
+//! owned instance is simply a move of the owned structure plus the common
+//! reference initialisation. Shared values still by default require one boxing
+//! level as well as virtual dispatch on certain operations; as described
+//! above, this property too can be dealt with by using a custom `SHARED` type.
 //!
 //! ## Destruction Cost
 //!
@@ -478,17 +568,22 @@
 //!
 //! ## `Deref` Cost
 //!
-//! `Supercow`'s `deref` implementation is branch-free and therefore generally
-//! runs reasonably quickly. It is not dependent on the ownership mode of the
-//! `Supercow`, and so is not affected by the shared reference type, most
-//! importantly, making no virtual function calls even under the default boxed
-//! shared reference type. However, the way it works may prevent LLVM
-//! optimisations from applying in particular circumstances.
+//! For the default `Supercow` type, the `Deref` is exactly equivalent to
+//! dereferencing an `&&BORROWED`.
+//!
+//! For `InlineSupercow`, the implementation is a bit slower, comparable to
+//! `std::borrow::Cow`.
+//!
+//! In all cases, the `Deref` implementation is not dependent on the ownership
+//! mode of the `Supercow`, and so is not affected by the shared reference
+//! type, most importantly, making no virtual function calls even under the
+//! default boxed shared reference type. However, the way it works colud
+//! prevent LLVM optimisations from applying in particular circumstances.
 //!
 //! For those wanting specifics, the function
 //!
 //! ```ignore
-//! // Substitute Cow with Supercow for the other case.
+//! // Substitute Cow with InlineSupercow for the other case.
 //! // This takes references so that the destructor code is not intermingled.
 //! fn add_two(a: &Cow<u32>, b: &Cow<u32>) -> u32 {
 //!   **a + **b
@@ -497,22 +592,23 @@
 //!
 //! results in the following on AMD64 with Rust 1.13.0:
 //!
-//! TODO UPDATE
-//!
 //! ```text
 //!  Cow                                Supercow
 //!  cmp    DWORD PTR [rdi],0x1         mov    rcx,QWORD PTR [rdi]
-//!  lea    rcx,[rdi+0x4]               and    rdi,QWORD PTR [rdi+0x8]
-//!  cmovne rcx,QWORD PTR [rdi+0x8]     mov    rax,QWORD PTR [rsi]
-//!  cmp    DWORD PTR [rsi],0x1         and    rsi,QWORD PTR [rsi+0x8]
-//!  lea    rax,[rsi+0x4]               mov    eax,DWORD PTR [rsi+rax]
-//!  cmovne rax,QWORD PTR [rsi+0x8]     add    eax,DWORD PTR [rdi+rcx]
-//!  mov    eax,DWORD PTR [rax]         ret
-//!  add    eax,DWORD PTR [rcx]
-//!  ret
+//!  lea    rcx,[rdi+0x4]               xor    eax,eax
+//!  cmovne rcx,QWORD PTR [rdi+0x8]     cmp    rcx,0x800
+//!  cmp    DWORD PTR [rsi],0x1         cmovae rdi,rax
+//!  lea    rax,[rsi+0x4]               mov    rdx,QWORD PTR [rsi]
+//!  cmovne rax,QWORD PTR [rsi+0x8]     cmp    rdx,0x800
+//!  mov    eax,DWORD PTR [rax]         cmovb  rax,rsi
+//!  add    eax,DWORD PTR [rcx]         mov    eax,DWORD PTR [rax+rdx]
+//!  ret                                add    eax,DWORD PTR [rdi+rcx]
+//!                                     ret
 //! ```
 //!
 //! The same code on ARM v7l and Rust 1.12.1:
+//!
+//! TODO UPDATE
 //!
 //! ```text
 //!  Cow                                Supercow
@@ -533,6 +629,12 @@
 //!  pop        {fp, pc}
 //! ```
 //!
+//! If the default `Supercow` is used above instead of `InlineSupercow`, the
+//! function actually compiles to the same thing as one taking two `&u32`
+//! arguments. (This is partially due to optimisations eliminating one level of
+//! indirection; if the optimiser did not do as much, it would be equivalent to
+//! taking two `&&u32` arguments.)
+//!
 //! ## `to_mut` Cost
 //!
 //! Obtaining a `Ref` is substantially more expensive than `Deref`, as it must
@@ -545,16 +647,51 @@
 //!
 //! ## Memory Usage
 //!
-//! TODO UPDATE
+//! The default `Supercow` is only one pointer wider than a mundane reference.
 //!
-//! The default `Supercow` can be quite large in comparison to a bare
-//! reference. This stems from two sources:
+//! ```
+//! use std::mem;
 //!
-//! - There is one pointer of overhead (i.e., beyond a mundane reference) for
-//! holding both the reference value and the borrowing mode information.
+//! use supercow::Supercow;
 //!
-//! - The default `Supercow` must be able to contain a full instance of
-//! `OWNED`.
+//! assert_eq!(mem::size_of::<&'static u32>() + mem::size_of::<*const ()>(),
+//!            mem::size_of::<Supercow<'static, u32>>());
+//!
+//! assert_eq!(mem::size_of::<&'static str>() + mem::size_of::<*const ()>(),
+//!            mem::size_of::<Supercow<'static, String, str>>());
+//! ```
+//!
+//! Of course, you also pay for heap space in this case when using owned or
+//! shared `Supercow`s.
+//!
+//! `InlineSupercow` can be quite large in comparison to a normal reference.
+//! You need to be particularly careful that structures you reference don't
+//! themselves contain `InlineSupercow`s or you can end up with
+//! quadratically-sized or even exponentially-sized structures.
+//!
+//! ```
+//! use std::mem;
+//!
+//! use supercow::InlineSupercow;
+//!
+//! // Define our structures
+//! struct Big([u8;1024]);
+//! struct A<'a>(InlineSupercow<'a, Big>);
+//! struct B<'b,'a:'b>(InlineSupercow<'b, A<'a>>);
+//! struct C<'b,'a:'b>(InlineSupercow<'b, B<'a,'a>>);
+//!
+//! // Now say an API consumer, etc, decides to use references
+//! let big = Big([0u8;1024]);
+//! let a = A((&big).into());
+//! let b = B((&a).into());
+//! let c = C((&b).into());
+//!
+//! // Well, we've now allocated space for four `Big`s on the stack, despite
+//! // only really needing one.
+//! assert!(mem::size_of_val(&big) + mem::size_of_val(&a) +
+//!         mem::size_of_val(&b) + mem::size_of_val(&c) >
+//!         4 * mem::size_of::<Big>());
+//! ```
 //!
 //! # Other Notes
 //!
@@ -1369,7 +1506,8 @@ mod misc_tests {
     }
 
     #[inline(never)]
-    fn add_two_supercow(a: &Supercow<u32>, b: &Supercow<u32>) -> u32 {
+    fn add_two_supercow(a: &InlineSupercow<u32>,
+                        b: &InlineSupercow<u32>) -> u32 {
         **a + **b
     }
 
