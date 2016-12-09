@@ -692,7 +692,8 @@ supercow_features!(
 pub type NonSyncSupercow<'a, OWNED, BORROWED = OWNED> =
     Supercow<'a, OWNED, BORROWED,
              Box<NonSyncFeatures<'static, Target = BORROWED> + 'static>,
-             InlineStorage<OWNED>>;
+             InlineStorage<OWNED, Box<
+                 NonSyncFeatures<'static, Target = BORROWED> + 'static>>>;
 
 /// `Supercow` with the default `STORAGE` changed to `BoxedStorage`.
 ///
@@ -724,10 +725,10 @@ pub type BoxedNonSyncSupercow<'a, OWNED, BORROWED = OWNED> =
 pub struct Supercow<'a, OWNED, BORROWED : ?Sized = OWNED,
                     SHARED = Box<DefaultFeatures<
                         'static, Target = BORROWED> + 'static>,
-                    STORAGE = InlineStorage<OWNED>>
+                    STORAGE = InlineStorage<OWNED, SHARED>>
 where BORROWED : 'a,
       &'a BORROWED : PointerFirstRef,
-      STORAGE : OwnedStorage<OWNED> {
+      STORAGE : OwnedStorage<OWNED, SHARED> {
     // This stores the precalculated `Deref` target, and is the only thing the
     // `Deref` implementation needs to inspect.
     //
@@ -786,10 +787,10 @@ where BORROWED : 'a,
     _shared: PhantomData<Box<SHARED>>,
 }
 
-enum SupercowMode<S> {
+enum SupercowMode {
     Owned(*mut ()),
     Borrowed,
-    Shared(S),
+    Shared(*mut ()),
 }
 
 use self::SupercowMode::*;
@@ -802,7 +803,7 @@ macro_rules! defimpl {
             $($spec)* Supercow<'a, OWNED, BORROWED, SHARED, STORAGE>
         where BORROWED : 'a,
               &'a BORROWED : PointerFirstRef,
-              STORAGE : OwnedStorage<OWNED>,
+              STORAGE : OwnedStorage<OWNED, SHARED>,
               $($wo)*
             $body
     }
@@ -810,9 +811,9 @@ macro_rules! defimpl {
 
 defimpl! {[] (Drop for) where { } {
     fn drop(&mut self) {
-        match self.raw_mode() {
-            Owned(ptr) => unsafe { self.storage.deallocate(ptr) },
-            Shared(ptr) => unsafe { drop(Box::<SHARED>::from_raw(ptr)) },
+        match self.mode() {
+            Owned(ptr) => unsafe { self.storage.deallocate_a(ptr) },
+            Shared(ptr) => unsafe { self.storage.deallocate_b(ptr) },
             Borrowed => (),
         }
     }
@@ -837,7 +838,7 @@ defimpl! {[] () where { } {
     pub fn owned(inner: OWNED) -> Self
     where OWNED : SafeBorrow<BORROWED> {
         let mut this = unsafe { Self::empty() };
-        this.mode = this.storage.allocate(inner);
+        this.mode = this.storage.allocate_a(inner);
         // This line could panic, but `this` doesn't have anything that would
         // run destructors at this point other than `storage`, which was
         // initialised in an ordinary way.
@@ -867,9 +868,8 @@ defimpl! {[] () where { } {
             &*(shared.const_deref() as *const BORROWED)
         };
 
-        let boxed_shared = Box::new(shared);
-        this.mode = (1usize | (Box::into_raw(boxed_shared)
-                               as *const SHARED as usize)) as *mut ();
+        let nominal_mode = this.storage.allocate_b(shared);
+        this.mode = (1usize | (nominal_mode as usize)) as *mut ();
         this
     }
 
@@ -904,7 +904,9 @@ defimpl! {[] () where { } {
                 _shared: PhantomData,
             }),
 
-            Shared(s) => Some(Self::shared_nocvt(s.clone())),
+            Shared(s) => Some(Self::shared_nocvt(unsafe {
+                this.storage.get_ptr_b(s)
+            }.clone())),
         }
     }
 
@@ -937,7 +939,7 @@ defimpl! {[] () where { } {
     /// assert_eq!(None, Supercow::extract_ref(&shared));
     /// ```
     pub fn extract_ref(this: &Self) -> Option<&'a BORROWED> {
-        match this.raw_mode() {
+        match this.mode() {
             Borrowed => Some(this.ptr),
             _ => None,
         }
@@ -950,7 +952,7 @@ defimpl! {[] () where { } {
           BORROWED : ToOwned<Owned = OWNED> {
         match this.mode() {
             Owned(ptr) => {
-                unsafe { this.storage.deallocate_into(ptr) }
+                unsafe { this.storage.deallocate_into_a(ptr) }
             },
             _ => (*this).to_owned(),
         }
@@ -974,7 +976,7 @@ defimpl! {[] () where { } {
           BORROWED : ToOwned<Owned = OWNED>,
     {
         // Become owned if not already.
-        match self.raw_mode() {
+        match self.mode() {
             Owned(_) => (),
             _ => *self = Self::owned((*self).to_owned()),
         }
@@ -983,7 +985,7 @@ defimpl! {[] () where { } {
         self.ptr = OWNED::borrow_replacement(self.ptr);
 
         Ref {
-            r: unsafe { self.storage.get_mut(self.mode) } as *mut OWNED,
+            r: unsafe { self.storage.get_mut_a(self.mode) } as *mut OWNED,
             parent: self,
         }
     }
@@ -994,7 +996,7 @@ defimpl! {[] () where { } {
         // `ptr` since the former has a borrow scoped to this
         // function.
         {
-            let borrowed_ptr = self.storage.get_ptr(self.mode).borrow();
+            let borrowed_ptr = self.storage.get_ptr_a(self.mode).borrow();
             self.ptr = &*(borrowed_ptr as *const BORROWED);
         }
 
@@ -1030,25 +1032,13 @@ defimpl! {[] () where { } {
         }
     }
 
-    fn raw_mode(&self) -> SupercowMode<*mut SHARED> {
+    fn mode(&self) -> SupercowMode {
         if self.mode.is_null() {
             Borrowed
         } else if 0 == (self.mode as usize & 1) {
             Owned(self.mode)
         } else {
-            Shared((self.mode as usize & !1usize) as *mut SHARED)
-        }
-    }
-
-    fn mode(&self) -> SupercowMode<&SHARED> {
-        if self.mode.is_null() {
-            Borrowed
-        } else if 0 == (self.mode as usize & 1) {
-            Owned(self.mode)
-        } else {
-            Shared(unsafe {
-                &*((self.mode as usize & !1usize) as *mut SHARED)
-            })
+            Shared((self.mode as usize & !1usize) as *mut ())
         }
     }
 
@@ -1078,7 +1068,7 @@ where OWNED : SafeBorrow<BORROWED>,
       BORROWED : 'a + ToOwned<Owned = OWNED>,
       for<'l> &'l BORROWED : PointerFirstRef,
       SHARED : ConstDeref<Target = BORROWED>,
-      STORAGE : OwnedStorage<OWNED> {
+      STORAGE : OwnedStorage<OWNED, SHARED> {
     /// Takes ownership of the underlying value, so that this `Supercow` has a
     /// `'static` lifetime.
     ///
@@ -1105,7 +1095,7 @@ where OWNED : SafeBorrow<BORROWED>,
     /// ```
     pub fn take_ownership<NS : ConstDeref<Target = BORROWED>>
         (mut this: Self) -> Supercow<'static, OWNED, BORROWED, NS, STORAGE>
-    {
+    where STORAGE : OwnedStorage<OWNED, NS> {
         let static_ptr: &'static BORROWED =
             unsafe { &*(this.ptr as *const BORROWED) };
 
@@ -1132,7 +1122,7 @@ where 'a: 'b,
       BORROWED : 'a,
       &'a BORROWED : PointerFirstRef,
       SHARED : 'b,
-      STORAGE : OwnedStorage<OWNED> + 'b {
+      STORAGE : OwnedStorage<OWNED, SHARED> + 'b {
     r: *mut OWNED,
     parent: &'b mut Supercow<'a, OWNED, BORROWED, SHARED, STORAGE>,
 }
@@ -1145,7 +1135,7 @@ where 'a: 'b,
       BORROWED : 'a,
       &'a BORROWED : PointerFirstRef,
       SHARED : 'b,
-      STORAGE : OwnedStorage<OWNED> + 'b {
+      STORAGE : OwnedStorage<OWNED, SHARED> + 'b {
     type Target = OWNED;
 
     #[inline]
@@ -1161,7 +1151,7 @@ where 'a: 'b,
       BORROWED : 'a,
       &'a BORROWED : PointerFirstRef,
       SHARED : 'b,
-      STORAGE : OwnedStorage<OWNED> + 'b {
+      STORAGE : OwnedStorage<OWNED, SHARED> + 'b {
     #[inline]
     fn deref_mut(&mut self) -> &mut OWNED {
         unsafe { &mut*self.r }
@@ -1175,7 +1165,7 @@ where 'a: 'b,
       BORROWED : 'a,
       &'a BORROWED : PointerFirstRef,
       SHARED : 'b,
-      STORAGE : OwnedStorage<OWNED> + 'b {
+      STORAGE : OwnedStorage<OWNED, SHARED> + 'b {
     #[inline]
     fn drop(&mut self) {
         // The value of `OWNED::borrow()` may have changed, so recompute
@@ -1222,7 +1212,7 @@ defimpl! {[] (Clone for) where {
     fn clone(&self) -> Self {
         match self.mode() {
             Owned(ptr) => Self::owned(unsafe {
-                self.storage.get_ptr(ptr)
+                self.storage.get_ptr_a(ptr)
             }.clone()),
 
             Borrowed => Supercow {
@@ -1233,7 +1223,9 @@ defimpl! {[] (Clone for) where {
                 _shared: PhantomData,
             },
 
-            Shared(s) => Self::shared_nocvt(s.clone()),
+            Shared(s) => Self::shared_nocvt(unsafe {
+                self.storage.get_ptr_b(s)
+            }.clone()),
         }
     }
 } }
@@ -1267,7 +1259,7 @@ defimpl! {[] (From<&'a OWNED> for) where {
 impl<'a, OWNED, SHARED, STORAGE> From<Rc<OWNED>>
 for Supercow<'a, OWNED, OWNED, SHARED, STORAGE>
 where SHARED : ConstDeref<Target = OWNED> + SharedFrom<Rc<OWNED>>,
-      STORAGE : OwnedStorage<OWNED>,
+      STORAGE : OwnedStorage<OWNED, SHARED>,
       OWNED : 'a,
       &'a OWNED : PointerFirstRef {
     fn from(rc: Rc<OWNED>) -> Self {
@@ -1277,7 +1269,7 @@ where SHARED : ConstDeref<Target = OWNED> + SharedFrom<Rc<OWNED>>,
 impl<'a, OWNED, SHARED, STORAGE> From<Arc<OWNED>>
 for Supercow<'a, OWNED, OWNED, SHARED, STORAGE>
 where SHARED : ConstDeref<Target = OWNED> + SharedFrom<Arc<OWNED>>,
-      STORAGE : OwnedStorage<OWNED>,
+      STORAGE : OwnedStorage<OWNED, SHARED>,
       OWNED : 'a,
       &'a OWNED : PointerFirstRef {
     fn from(rc: Arc<OWNED>) -> Self {

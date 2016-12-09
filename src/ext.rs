@@ -158,13 +158,16 @@ impl <T> SharedFrom<Arc<T>> for Arc<T> {
     fn shared_from(t: Arc<T>) -> Arc<T> { t }
 }
 
-/// Describes how an `OWNED` value is stored in a `Supercow`.
+/// Describes how an `OWNED` or `SHARED` value is stored in a `Supercow`.
+///
+/// All notes for `*_b` functions are the same as the corresponding `*_a`
+/// functions.
 ///
 /// ## Unsafety
 ///
 /// `Supercow` relies strongly on the contracts of the functions in this trait
 /// being implemented correctly.
-pub unsafe trait OwnedStorage<T> : Default {
+pub unsafe trait OwnedStorage<A, B> : Default {
     /// Allocates the given owned value.
     ///
     /// `self` is a `Default`-initialised instance.
@@ -182,36 +185,46 @@ pub unsafe trait OwnedStorage<T> : Default {
     ///
     /// Behaviour is undefined if this returns a null pointer. (But the
     /// returned pointer does not need to actually point at anything.)
-    fn allocate(&mut self, value: T) -> *mut ();
+    fn allocate_a(&mut self, value: A) -> *mut ();
+    /// See `allocate_a`.
+    fn allocate_b(&mut self, value: B) -> *mut ();
     /// Extracts the immutable reference from the saved pointer and storage.
     ///
     /// ## Unsafety
     ///
     /// This call may assume that `ptr` is exactly a (2-byte-aligned) value it
-    /// returned from `allocate`, and that `self` was initialised by a call to
-    /// `allocate`.
-    unsafe fn get_ptr<'a>(&'a self, ptr: *mut ()) -> &'a T;
+    /// returned from `allocate_a`, and that `self` was initialised by a call
+    /// to `allocate_a`.
+    unsafe fn get_ptr_a<'a>(&'a self, ptr: *mut ()) -> &'a A;
+    /// See `get_ptr_a`.
+    unsafe fn get_ptr_b<'a>(&'a self, ptr: *mut ()) -> &'a B;
     /// Extracts the mutable reference from the saved pointer and storage.
     ///
     /// ## Unsafety
     ///
     /// This call may assume that `ptr` is exactly a (2-byte-aligned) value it
-    /// returned from `allocate` and that `self` was initialised by a call to
-    /// `allocate`.
-    unsafe fn get_mut<'a>(&'a mut self, ptr: *mut ()) -> &'a mut T;
+    /// returned from `allocate_a` and that `self` was initialised by a call to
+    /// `allocate_a`.
+    unsafe fn get_mut_a<'a>(&'a mut self, ptr: *mut ()) -> &'a mut A;
+    /// See `get_mut_a`.
+    unsafe fn get_mut_b<'a>(&'a mut self, ptr: *mut ()) -> &'a mut B;
     /// Releases any allocations that would not be released by `Stored`
     /// being dropped.
     ///
     /// ## Unsafety
     ///
     /// This call may assume that `ptr` is exactly a (2-byte-aligned) value it
-    /// returned from `allocate`.
+    /// returned from `allocate_a`.
     ///
     /// Once this function is called, the given `ptr` is considered invalid and
     /// any further use is undefined.
-    unsafe fn deallocate(&mut self, ptr: *mut ());
-    /// Like `deallocate()`, but also return the owned value.
-    unsafe fn deallocate_into(&mut self, ptr: *mut ()) -> T;
+    unsafe fn deallocate_a(&mut self, ptr: *mut ());
+    /// See `deallocate_b`.
+    unsafe fn deallocate_b(&mut self, ptr: *mut ());
+    /// Like `deallocate_a()`, but also return the owned value.
+    unsafe fn deallocate_into_a(&mut self, ptr: *mut ()) -> A;
+    /// See `deallocate_into_a`.
+    unsafe fn deallocate_into_b(&mut self, ptr: *mut ()) -> B;
 
     /// Returns whether this storage implementation ever causes the owned
     /// object to be stored internally to the `Supercow`.
@@ -223,50 +236,91 @@ pub unsafe trait OwnedStorage<T> : Default {
     fn is_internal_storage() -> bool;
 }
 
-/// Causes the `OWNED` value of a `Supercow` to be stored inline.
+/// Causes the `OWNED` or `SHARED` value of a `Supercow` to be stored inline.
 ///
 /// This makes allocation of owned `Supercow`s much faster, at the expense of
 /// making the `Supercow` itself much bigger (since it now must contain the
 /// whole object).
 #[derive(Clone, Copy, Debug)]
-pub struct InlineStorage<T>(Option<T>);
-impl<T> Default for InlineStorage<T> {
+pub struct InlineStorage<A, B>(InlineStorageImpl<A, B>);
+
+#[derive(Clone, Copy, Debug)]
+enum InlineStorageImpl<A, B> {
+    None,
+    A(A),
+    B(B),
+}
+
+impl<A, B> Default for InlineStorage<A, B> {
     fn default() -> Self {
-        InlineStorage(None)
+        InlineStorage(InlineStorageImpl::None)
     }
 }
 
-unsafe impl<T> OwnedStorage<T> for InlineStorage<T> {
+unsafe impl<A, B> OwnedStorage<A, B> for InlineStorage<A, B> {
     #[inline]
-    fn allocate(&mut self, value: T) -> *mut () {
-        self.0 = Some(value);
+    fn allocate_a(&mut self, value: A) -> *mut () {
+        self.0 = InlineStorageImpl::A(value);
         2usize as *mut ()
     }
 
     #[inline]
-    unsafe fn get_ptr<'a>(&'a self, _: *mut ()) -> &'a T {
+    fn allocate_b(&mut self, value: B) -> *mut () {
+        self.0 = InlineStorageImpl::B(value);
+        2usize as *mut ()
+    }
+
+    #[inline]
+    unsafe fn get_ptr_a<'a>(&'a self, _: *mut ()) -> &'a A {
         match self.0 {
-            Some(ref r) => r,
-            None => unreachable!(),
+            InlineStorageImpl::A(ref r) => r,
+            _ => unreachable!(),
         }
     }
 
     #[inline]
-    unsafe fn get_mut<'a>(&'a mut self, _: *mut ()) -> &'a mut T {
+    unsafe fn get_ptr_b<'a>(&'a self, _: *mut ()) -> &'a B {
         match self.0 {
-            Some(ref mut r) => r,
-            None => unreachable!(),
+            InlineStorageImpl::B(ref r) => r,
+            _ => unreachable!(),
         }
     }
 
     #[inline]
-    unsafe fn deallocate(&mut self, _: *mut ()) { }
+    unsafe fn get_mut_a<'a>(&'a mut self, _: *mut ()) -> &'a mut A {
+        match self.0 {
+            InlineStorageImpl::A(ref mut r) => r,
+            _ => unreachable!(),
+        }
+    }
 
     #[inline]
-    unsafe fn deallocate_into(&mut self, _: *mut ()) -> T {
-        match mem::replace(self, InlineStorage(None)).0 {
-            Some(v) => v,
-            None => unreachable!(),
+    unsafe fn get_mut_b<'a>(&'a mut self, _: *mut ()) -> &'a mut B {
+        match self.0 {
+            InlineStorageImpl::B(ref mut r) => r,
+            _ => unreachable!(),
+        }
+    }
+
+    #[inline]
+    unsafe fn deallocate_a(&mut self, _: *mut ()) { }
+
+    #[inline]
+    unsafe fn deallocate_b(&mut self, _: *mut ()) { }
+
+    #[inline]
+    unsafe fn deallocate_into_a(&mut self, _: *mut ()) -> A {
+        match mem::replace(&mut self.0, InlineStorageImpl::None) {
+            InlineStorageImpl::A(v) => v,
+            _ => unreachable!(),
+        }
+    }
+
+    #[inline]
+    unsafe fn deallocate_into_b(&mut self, _: *mut ()) -> B {
+        match mem::replace(&mut self.0, InlineStorageImpl::None) {
+            InlineStorageImpl::B(v) => v,
+            _ => unreachable!(),
         }
     }
 
@@ -281,10 +335,10 @@ unsafe impl<T> OwnedStorage<T> for InlineStorage<T> {
 /// implementation.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct BoxedStorage;
-unsafe impl<T> OwnedStorage<T> for BoxedStorage {
+unsafe impl<A, B> OwnedStorage<A, B> for BoxedStorage {
     #[inline]
-    fn allocate(&mut self, value: T) -> *mut () {
-        if mem::size_of::<T>() > 0 {
+    fn allocate_a(&mut self, value: A) -> *mut () {
+        if mem::size_of::<A>() > 0 {
             let boxed = Box::new(value);
             let address = Box::into_raw(boxed);
             address as *mut ()
@@ -296,28 +350,67 @@ unsafe impl<T> OwnedStorage<T> for BoxedStorage {
     }
 
     #[inline]
-    unsafe fn get_ptr<'a>(&'a self, ptr: *mut ()) -> &'a T {
-        &*(ptr as *const T)
-    }
-
-    #[inline]
-    unsafe fn get_mut<'a>(&'a mut self, ptr: *mut ()) -> &'a mut T {
-        &mut*(ptr as *mut T)
-    }
-
-    #[inline]
-    unsafe fn deallocate(&mut self, ptr: *mut ()) {
-        if mem::size_of::<T>() > 0 {
-            drop(Box::from_raw(ptr as *mut T))
+    fn allocate_b(&mut self, value: B) -> *mut () {
+        if mem::size_of::<B>() > 0 {
+            let boxed = Box::new(value);
+            let address = Box::into_raw(boxed);
+            address as *mut ()
+        } else {
+            // Handle ZSTs specially, since `Box` "allocates" them at address
+            // 1.
+            2 as *mut ()
         }
     }
 
     #[inline]
-    unsafe fn deallocate_into(&mut self, ptr: *mut ()) -> T {
-        if mem::size_of::<T>() > 0 {
-            *Box::from_raw(ptr as *mut T)
+    unsafe fn get_ptr_a<'a>(&'a self, ptr: *mut ()) -> &'a A {
+        &*(ptr as *const A)
+    }
+
+    #[inline]
+    unsafe fn get_ptr_b<'a>(&'a self, ptr: *mut ()) -> &'a B {
+        &*(ptr as *const B)
+    }
+
+    #[inline]
+    unsafe fn get_mut_a<'a>(&'a mut self, ptr: *mut ()) -> &'a mut A {
+        &mut*(ptr as *mut A)
+    }
+
+    #[inline]
+    unsafe fn get_mut_b<'a>(&'a mut self, ptr: *mut ()) -> &'a mut B {
+        &mut*(ptr as *mut B)
+    }
+
+    #[inline]
+    unsafe fn deallocate_a(&mut self, ptr: *mut ()) {
+        if mem::size_of::<A>() > 0 {
+            drop(Box::from_raw(ptr as *mut A))
+        }
+    }
+
+    #[inline]
+    unsafe fn deallocate_b(&mut self, ptr: *mut ()) {
+        if mem::size_of::<B>() > 0 {
+            drop(Box::from_raw(ptr as *mut B))
+        }
+    }
+
+    #[inline]
+    unsafe fn deallocate_into_a(&mut self, ptr: *mut ()) -> A {
+        if mem::size_of::<A>() > 0 {
+            *Box::from_raw(ptr as *mut A)
         } else {
-            ptr::read(ptr as *mut T)
+            ptr::read(ptr as *mut A)
+        }
+    }
+
+    #[inline]
+    unsafe fn deallocate_into_b(&mut self, ptr: *mut ()) -> B {
+        if mem::size_of::<B>() > 0 {
+            *Box::from_raw(ptr as *mut B)
+        } else {
+            ptr::read(ptr as *mut B)
         }
     }
 
