@@ -694,6 +694,26 @@ pub type NonSyncSupercow<'a, OWNED, BORROWED = OWNED> =
              Box<NonSyncFeatures<'static, Target = BORROWED> + 'static>,
              InlineStorage<OWNED>>;
 
+/// `Supercow` with the default `STORAGE` changed to `BoxedStorage`.
+///
+/// This results in a much smaller `Supercow` at the expense of increasing the
+/// cost of constructing owned `Supercow`s. It also makes the `Deref`
+/// implementation faster.
+pub type BoxedSupercow<'a, OWNED, BORROWED = OWNED,
+                       SHARED = Box<DefaultFeatures<
+                           'static, Target = BORROWED> + 'static>> =
+    Supercow<'a, OWNED, BORROWED, SHARED, BoxedStorage>;
+
+/// `NonSyncSupercow` with the `STORAGE` changed to `BoxedStorage`.
+///
+/// This results in a much smaller `Supercow` at the expense of increasing the
+/// cost of constructing owned `Supercow`s. It also makes the `Deref`
+/// implementation faster.
+pub type BoxedNonSyncSupercow<'a, OWNED, BORROWED = OWNED> =
+    Supercow<'a, OWNED, BORROWED,
+             Box<NonSyncFeatures<'static, Target = BORROWED> + 'static>,
+             BoxedStorage>;
+
 /// The actual generic reference type.
 ///
 /// See the module documentation for most of the details.
@@ -1344,8 +1364,36 @@ defimpl! {[] (Hash for) where {
 } }
 
 #[cfg(test)]
-mod test {
+mod misc_tests {
     use std::borrow::Cow;
+
+    use super::*;
+
+    // This is where the asm in the Performance Notes section comes from.
+    #[inline(never)]
+    fn add_two_cow(a: &Cow<u32>, b: &Cow<u32>) -> u32 {
+        **a + **b
+    }
+
+    #[inline(never)]
+    fn add_two_supercow(a: &Supercow<u32>, b: &Supercow<u32>) -> u32 {
+        **a + **b
+    }
+
+    #[test]
+    fn do_add_two() {
+        // Need to call `add_two_cow` twice to prevent LLVM from specialising
+        // it.
+        assert_eq!(42, add_two_cow(&Cow::Owned(40), &Cow::Owned(2)));
+        assert_eq!(44, add_two_cow(&Cow::Borrowed(&38), &Cow::Borrowed(&6)));
+        assert_eq!(42, add_two_supercow(&Supercow::owned(40),
+                                        &Supercow::owned(2)));
+    }
+}
+
+macro_rules! tests { ($modname:ident, $stype:ident) => {
+#[cfg(test)]
+mod $modname {
     use std::sync::Arc;
 
     use super::*;
@@ -1353,7 +1401,7 @@ mod test {
     #[test]
     fn ref_to_owned() {
         let x = 42u32;
-        let a: Supercow<u32> = Supercow::borrowed(&x);
+        let a: $stype<u32> = Supercow::borrowed(&x);
         assert_eq!(x, *a);
         assert_eq!(&x as *const u32 as usize,
                    (&*a) as *const u32 as usize);
@@ -1373,8 +1421,8 @@ mod test {
 
     #[test]
     fn supports_dst() {
-        let a: Supercow<String, str> = Supercow::borrowed("hello");
-        let b: Supercow<String, str> = Supercow::owned("hello".to_owned());
+        let a: $stype<String, str> = Supercow::borrowed("hello");
+        let b: $stype<String, str> = Supercow::owned("hello".to_owned());
         assert_eq!(a, b);
 
         let mut c = a.clone();
@@ -1385,13 +1433,13 @@ mod test {
 
     #[test]
     fn default_accepts_arc() {
-        let x: Supercow<u32> = Supercow::shared(Arc::new(42u32));
+        let x: $stype<u32> = Supercow::shared(Arc::new(42u32));
         assert_eq!(42, *x);
     }
 
     #[test]
     fn ref_safe_even_if_forgotten() {
-        let mut x: Supercow<String, str> = Supercow::owned("foo".to_owned());
+        let mut x: $stype<String, str> = Supercow::owned("foo".to_owned());
         {
             let mut m = x.to_mut();
             // Add a bunch of characters to invalidate the allocation
@@ -1424,7 +1472,7 @@ mod test {
             }
         }
 
-        let x: Supercow<u32> = Supercow::owned(42u32);
+        let x: $stype<u32> = Supercow::owned(42u32);
         test_fmt!("{}", x);
         test_fmt!("{:?}", x);
         test_fmt!("{:o}", x);
@@ -1457,7 +1505,7 @@ mod test {
         // about which one will eventually be chosen, and so one of the values
         // is guaranteed to eventually be moved off the heap onto the stack.
         #[inline(never)]
-        fn pick_one() -> Supercow<'static, String> {
+        fn pick_one() -> $stype<'static, String> {
             use std::collections::HashMap;
 
             let mut hm = HashMap::new();
@@ -1473,7 +1521,7 @@ mod test {
 
     #[test]
     fn dst_string_str() {
-        let mut s: Supercow<'static, String, str> = String::new().into();
+        let mut s: $stype<'static, String, str> = String::new().into();
         let mut expected = String::new();
         for i in 0..1024 {
             assert_eq!(expected.as_str(), &*s);
@@ -1485,7 +1533,7 @@ mod test {
 
     #[test]
     fn dst_vec_u8s() {
-        let mut s: Supercow<'static, Vec<u8>, [u8]> = Vec::new().into();
+        let mut s: $stype<'static, Vec<u8>, [u8]> = Vec::new().into();
         let mut expected = Vec::<u8>::new();
         for i in 0..1024 {
             assert_eq!(&expected[..], &*s);
@@ -1499,7 +1547,7 @@ mod test {
     fn dst_osstring_osstr() {
         use std::ffi::{OsStr, OsString};
 
-        let mut s: Supercow<'static, OsString, OsStr> = OsString::new().into();
+        let mut s: $stype<'static, OsString, OsStr> = OsString::new().into();
         let mut expected = OsString::new();
         for i in 0..1024 {
             assert_eq!(expected.as_os_str(), &*s);
@@ -1515,7 +1563,7 @@ mod test {
         use std::mem;
         use std::ops::Deref;
 
-        let mut s: Supercow<'static, CString, CStr> =
+        let mut s: $stype<'static, CString, CStr> =
             CString::new("").unwrap().into();
         let mut expected = CString::new("").unwrap();
         for i in 0..1024 {
@@ -1548,7 +1596,7 @@ mod test {
     fn dst_pathbuf_path() {
         use std::path::{Path, PathBuf};
 
-        let mut s: Supercow<'static, PathBuf, Path> = PathBuf::new().into();
+        let mut s: $stype<'static, PathBuf, Path> = PathBuf::new().into();
         let mut expected = PathBuf::new();
         for i in 0..1024 {
             assert_eq!(expected.as_path(), &*s);
@@ -1557,26 +1605,9 @@ mod test {
             assert_eq!(expected.as_path(), &*s);
         }
     }
+} } }
 
-    // This is where the asm in the Performance Notes section comes from.
-
-    #[inline(never)]
-    fn add_two_cow(a: &Cow<u32>, b: &Cow<u32>) -> u32 {
-        **a + **b
-    }
-
-    #[inline(never)]
-    fn add_two_supercow(a: &Supercow<u32>, b: &Supercow<u32>) -> u32 {
-        **a + **b
-    }
-
-    #[test]
-    fn do_add_two() {
-        // Need to call `add_two_cow` twice to prevent LLVM from specialising
-        // it.
-        assert_eq!(42, add_two_cow(&Cow::Owned(40), &Cow::Owned(2)));
-        assert_eq!(44, add_two_cow(&Cow::Borrowed(&38), &Cow::Borrowed(&6)));
-        assert_eq!(42, add_two_supercow(&Supercow::owned(40),
-                                        &Supercow::owned(2)));
-    }
-}
+tests!(default_tests, Supercow);
+tests!(nonsync_tests, NonSyncSupercow);
+tests!(boxed_tests, BoxedSupercow);
+tests!(boxed_nonsync_tests, BoxedNonSyncSupercow);
