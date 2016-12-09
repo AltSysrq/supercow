@@ -1594,7 +1594,6 @@ mod $modname {
     #[test]
     fn general_trait_delegs_work() {
         use std::borrow::Borrow;
-        use std::collections::hash_map::DefaultHasher;
         use std::convert::AsRef;
         use std::cmp::*;
         use std::hash::*;
@@ -1622,9 +1621,9 @@ mod $modname {
         assert_eq!(42.partial_cmp(&43), x.partial_cmp(&43));
         assert_eq!(42.cmp(&43), x.cmp(&Supercow::owned(43)));
 
-        let mut expected_hash = DefaultHasher::new();
+        let mut expected_hash = SipHasher::new();
         42u32.hash(&mut expected_hash);
-        let mut actual_hash = DefaultHasher::new();
+        let mut actual_hash = SipHasher::new();
         x.hash(&mut actual_hash);
         assert_eq!(expected_hash.finish(), actual_hash.finish());
 
