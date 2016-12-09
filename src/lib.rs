@@ -1598,6 +1598,9 @@ mod $modname {
     }
 
     #[test]
+    // `SipHasher` is deprecated, but its replacement `DefaultHasher` doesn't
+    // exist in Rust 1.12.1.
+    #[allow(deprecated)]
     fn general_trait_delegs_work() {
         use std::borrow::Borrow;
         use std::convert::AsRef;
