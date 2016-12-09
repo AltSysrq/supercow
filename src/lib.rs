@@ -572,7 +572,7 @@
 //! dereferencing an `&&BORROWED`.
 //!
 //! For `InlineSupercow`, the implementation is a bit slower, comparable to
-//! `std::borrow::Cow`.
+//! `std::borrow::Cow` but with fewer memory accesses..
 //!
 //! In all cases, the `Deref` implementation is not dependent on the ownership
 //! mode of the `Supercow`, and so is not affected by the shared reference
@@ -608,21 +608,19 @@
 //!
 //! The same code on ARM v7l and Rust 1.12.1:
 //!
-//! TODO UPDATE
-//!
 //! ```text
 //!  Cow                                Supercow
-//!  push       {fp, lr}                push    {fp, lr}
-//!  mov        r2, r0                  ldr     r3, [r0, #4]
-//!  ldr        r3, [r2, #4]!           ldr     r2, [r1, #4]
-//!  ldr        ip, [r0]                ldr     lr, [r0]
-//!  mov        r0, r1                  and     r0, r3, r0
-//!  ldr        lr, [r0, #4]!           ldr     ip, [r1]
-//!  ldr        r1, [r1]                and     r1, r2, r1
-//!  cmp        ip, #1                  ldr     r0, [r0, lr]
-//!  moveq      r3, r2                  ldr     r1, [r1, ip]
-//!  cmp        r1, #1                  add     r0, r1, r0
-//!  ldr        r2, [r3]                pop     {fp, pc}
+//!  push       {fp, lr}                ldr     r2, [r0]
+//!  mov        r2, r0                  ldr     r3, [r1]
+//!  ldr        r3, [r2, #4]!           cmp     r2, #2048
+//!  ldr        ip, [r0]                addcc   r2, r2, r0
+//!  mov        r0, r1                  cmp     r3, #2048
+//!  ldr        lr, [r0, #4]!           addcc   r3, r3, r1
+//!  ldr        r1, [r1]                ldr     r0, [r2]
+//!  cmp        ip, #1                  ldr     r1, [r3]
+//!  moveq      r3, r2                  add     r0, r1, r0
+//!  cmp        r1, #1                  bx      lr
+//!  ldr        r2, [r3]
 //!  moveq      lr, r0
 //!  ldr        r0, [lr]
 //!  add        r0, r0, r2
