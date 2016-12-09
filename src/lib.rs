@@ -545,6 +545,8 @@
 //!
 //! ## Memory Usage
 //!
+//! TODO UPDATE
+//!
 //! The default `Supercow` can be quite large in comparison to a bare
 //! reference. This stems from two sources:
 //!
@@ -553,8 +555,6 @@
 //!
 //! - The default `Supercow` must be able to contain a full instance of
 //! `OWNED`.
-//!
-//! The second can be addressed by using `BoxedSupercow` instead.
 //!
 //! # Other Notes
 //!
@@ -692,28 +692,27 @@ supercow_features!(
 pub type NonSyncSupercow<'a, OWNED, BORROWED = OWNED> =
     Supercow<'a, OWNED, BORROWED,
              Box<NonSyncFeatures<'static, Target = BORROWED> + 'static>,
-             InlineStorage<OWNED, Box<
-                 NonSyncFeatures<'static, Target = BORROWED> + 'static>>>;
+             BoxedStorage>;
 
-/// `Supercow` with the default `STORAGE` changed to `BoxedStorage`.
+/// `Supercow` with the default `STORAGE` changed to `InlineStorage`.
 ///
-/// This results in a much smaller `Supercow` at the expense of increasing the
-/// cost of constructing owned `Supercow`s. It also makes the `Deref`
-/// implementation faster.
-pub type BoxedSupercow<'a, OWNED, BORROWED = OWNED,
+/// This reduces the number of allocations needed to construct an owned or
+/// shared `Superow` (down to zero for owned, but note that the default
+/// `SHARED` still has its own `Box`) at the cost of bloating the `Supercow`
+/// itself, as it now needs to be able to fit a whole `OWNED` instance.
+pub type InlineSupercow<'a, OWNED, BORROWED = OWNED,
                        SHARED = Box<DefaultFeatures<
                            'static, Target = BORROWED> + 'static>> =
-    Supercow<'a, OWNED, BORROWED, SHARED, BoxedStorage>;
+    Supercow<'a, OWNED, BORROWED, SHARED, InlineStorage<OWNED, SHARED>>;
 
-/// `NonSyncSupercow` with the `STORAGE` changed to `BoxedStorage`.
+/// `NonSyncSupercow` with the `STORAGE` changed to `InlineStorage`.
 ///
-/// This results in a much smaller `Supercow` at the expense of increasing the
-/// cost of constructing owned `Supercow`s. It also makes the `Deref`
-/// implementation faster.
-pub type BoxedNonSyncSupercow<'a, OWNED, BORROWED = OWNED> =
+/// This combines both properties of `NonSyncSupercow` and `InlineSupercow`.
+pub type InlineNonSyncSupercow<'a, OWNED, BORROWED = OWNED> =
     Supercow<'a, OWNED, BORROWED,
              Box<NonSyncFeatures<'static, Target = BORROWED> + 'static>,
-             BoxedStorage>;
+             InlineStorage<OWNED, Box<
+                 NonSyncFeatures<'static, Target = BORROWED> + 'static>>>;
 
 /// The actual generic reference type.
 ///
@@ -725,7 +724,7 @@ pub type BoxedNonSyncSupercow<'a, OWNED, BORROWED = OWNED> =
 pub struct Supercow<'a, OWNED, BORROWED : ?Sized = OWNED,
                     SHARED = Box<DefaultFeatures<
                         'static, Target = BORROWED> + 'static>,
-                    STORAGE = InlineStorage<OWNED, SHARED>>
+                    STORAGE = BoxedStorage>
 where BORROWED : 'a,
       &'a BORROWED : PointerFirstRef,
       STORAGE : OwnedStorage<OWNED, SHARED> {
@@ -1599,7 +1598,7 @@ mod $modname {
     }
 } } }
 
-tests!(default_tests, Supercow);
-tests!(nonsync_tests, NonSyncSupercow);
-tests!(boxed_tests, BoxedSupercow);
-tests!(boxed_nonsync_tests, BoxedNonSyncSupercow);
+tests!(inline_sync_tests, InlineSupercow);
+tests!(inline_nonsync_tests, InlineNonSyncSupercow);
+tests!(boxed_sync_tests, Supercow);
+tests!(boxed_nonsync_tests, NonSyncSupercow);
