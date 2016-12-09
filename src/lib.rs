@@ -675,6 +675,8 @@
 //! use supercow::InlineSupercow;
 //!
 //! // Define our structures
+//! // (The extra lifetimes are needed for intra-function lifetime inference to
+//! // succeed.)
 //! struct Big([u8;1024]);
 //! struct A<'a>(InlineSupercow<'a, Big>);
 //! struct B<'b,'a:'b>(InlineSupercow<'b, A<'a>>);
