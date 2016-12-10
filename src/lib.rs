@@ -943,9 +943,17 @@ pub type InlineNonSyncSupercow<'a, OWNED, BORROWED = OWNED> =
 ///
 /// See the module documentation for most of the details.
 ///
-/// The generics here may look somewhat frightening at first; try not to be too
-/// alarmed, and remember that in most use-cases all you need to worry about is
-/// the stuff concerning `OWNED`.
+/// Most of the generics requirements you don't need to pay too much attention
+/// to if you aren't making custom `SHARED` or `STORAGE` types, etc. In
+/// general:
+///
+/// - `OWNED` may be constrained to be `Clone` and/or `BORROWED` as `ToOwned`
+/// if cloning an inner value is needed.
+///
+/// - External traits are defined against `BORROWED`.
+///
+/// - `PTR : PtrRead<BORROWED>` means the operation is not available on
+/// `Phantomcow`.
 pub struct Supercow<'a, OWNED, BORROWED : ?Sized = OWNED,
                     SHARED = Box<DefaultFeatures<
                         'static, Target = BORROWED> + 'static>,
