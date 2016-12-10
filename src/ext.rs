@@ -198,12 +198,12 @@ where T : Borrow<Path> {
 /// Behaviour is undefined if the reference has any `Drop` implementation,
 /// should a future Rust version make such things possible.
 pub unsafe trait PointerFirstRef { }
-unsafe impl<'a, T : Sized> PointerFirstRef for &'a T { }
-unsafe impl<'a, T> PointerFirstRef for &'a [T] { }
-unsafe impl<'a> PointerFirstRef for &'a str { }
-unsafe impl<'a> PointerFirstRef for &'a ::std::ffi::CStr { }
-unsafe impl<'a> PointerFirstRef for &'a ::std::ffi::OsStr { }
-unsafe impl<'a> PointerFirstRef for &'a ::std::path::Path { }
+unsafe impl<T : Sized> PointerFirstRef for *const T { }
+unsafe impl<T> PointerFirstRef for *const [T] { }
+unsafe impl PointerFirstRef for *const str { }
+unsafe impl PointerFirstRef for *const ::std::ffi::CStr { }
+unsafe impl PointerFirstRef for *const ::std::ffi::OsStr { }
+unsafe impl PointerFirstRef for *const ::std::path::Path { }
 
 /// Like `std::convert::From`, but without the blanket implementations that
 /// cause problems for `supercow_features!`.
@@ -479,4 +479,63 @@ unsafe impl<A, B> OwnedStorage<A, B> for BoxedStorage {
 
     #[inline]
     fn is_internal_storage() -> bool { false }
+}
+
+/// Optionally stores a pointer to a value.
+///
+/// It is doubtful that there are any types besides `()` and `*mut T` which
+/// could implement this usefully.
+pub unsafe trait PtrWrite<T : ?Sized> : Copy {
+    /// Writes the given reference into `self`.
+    ///
+    /// ## Unsafety
+    ///
+    /// The implementation must not inspect the given reference. This call must
+    /// not panic.
+    fn store_ptr(&mut self, t: *const T);
+}
+
+unsafe impl<T : ?Sized> PtrWrite<T> for () {
+    #[inline(always)]
+    fn store_ptr(&mut self, _: *const T) { }
+}
+
+unsafe impl<T : ?Sized> PtrWrite<T> for *const T {
+    #[inline(always)]
+    fn store_ptr(&mut self, t: *const T) {
+        *self = t;
+    }
+}
+
+/// Read trait corresponding to `PtrWrite`.
+pub unsafe trait PtrRead<T : ?Sized> : PtrWrite<T> {
+    /// Returns the pointer most recently stored via `store_ptr()`.
+    ///
+    /// ## Unsafety
+    ///
+    /// Behaviour is undefined if the returned value is not *exactly* equal to
+    /// the value passed in to the last call to `store_ptr()`. This call must
+    /// not panic.
+    fn get_ptr(&self) -> *const T;
+}
+
+unsafe impl<T : ?Sized> PtrRead<T> for *const T {
+    #[inline(always)]
+    fn get_ptr(&self) -> *const T {
+        *self
+    }
+}
+
+// This is completely unsafe for anything outside of `Ref` to use. It exists so
+// that `Ref` doesn't need to have all the generics needed to refer to its
+// parent directly, instead allowing anyone to just say `Ref<Supercow<...>>`.
+//
+// It does need to be public though since it's mentioned in type constraints
+// and so forth.
+#[allow(missing_docs)]
+#[doc(hidden)]
+pub trait RefParent {
+    type Owned : ?Sized;
+
+    unsafe fn supercow_ref_drop(&mut self);
 }
