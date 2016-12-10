@@ -11,6 +11,7 @@
 
 use std::borrow::Borrow;
 use std::ffi::{CStr, OsStr};
+use std::marker::PhantomData;
 use std::mem;
 use std::path::Path;
 use std::ptr;
@@ -54,6 +55,65 @@ unsafe impl<T : ConstDeref + ?Sized> ConstDeref for Box<T> {
         (**self).const_deref()
     }
 }
+
+/// Trait for `ConstDeref` implementations which can be constructed in a
+/// two-step process.
+///
+/// This is used by `Supercow` to safely promote owned values to shared values.
+/// A two-step process is necessary because the implementation must atomically
+/// transfer ownership of the value and so must set everything up first in case
+/// setup panics.
+///
+/// Essentially, such shared references actaully hold an `Option<Target>` which
+/// defaults to `None`, and panic if dereffed before the value is set.
+pub trait TwoStepShared<T> : ConstDeref {
+    /// Returns a new, empty instance of `Self`.
+    fn new_two_step() -> Self;
+    /// Returns the internal `Option<T>` backing this value.
+    ///
+    /// ## Unsafety
+    ///
+    /// This call may assume that `self` was produced by a call to
+    /// `new_two_step` on the same trait. (This is to allow downcasting without
+    /// requiring `Any` which in turn requires `'static`.)
+    ///
+    /// The implementation must guarantee that, after `Some(T)` is written into
+    /// the returned reference, the `const_deref()` method will never panic.
+    unsafe fn deref_holder(&mut self) -> &mut Option<T>;
+}
+
+macro_rules! twostepwrapper { ($outer:ident, $inner:ident) => {
+    /// Wrapper providing a `TwoStepShared` implementation.
+    pub struct $outer<T, B : ?Sized>($inner<Option<T>>, PhantomData<B>);
+    unsafe impl<T, B : ?Sized> ConstDeref for $outer<T, B>
+    where T : Borrow<B> {
+        type Target = B;
+        fn const_deref(&self) -> &B {
+            self.0.const_deref()
+                .as_ref()
+                .expect("Uninitialised two-step wrapper")
+                .borrow()
+        }
+    }
+    impl<T, B : ?Sized> Clone for $outer<T, B> {
+        fn clone(&self) -> Self {
+            $outer(self.0.clone(), PhantomData)
+        }
+    }
+
+    impl<T, B : ?Sized> TwoStepShared<T> for $outer<T, B>
+    where T : Borrow<B> {
+        fn new_two_step() -> Self {
+            $outer($inner::new(None), PhantomData)
+        }
+        unsafe fn deref_holder(&mut self) -> &mut Option<T> {
+            $inner::get_mut(&mut self.0)
+                .expect("Two-step wrapper already cloned")
+        }
+    }
+} }
+twostepwrapper!(TwoStepRc, Rc);
+twostepwrapper!(TwoStepArc, Arc);
 
 /// The maximum displacement (relative to the start of the object) that a
 /// reference pointing into `self` from an instance of `SafeBorrow` may have.
@@ -218,6 +278,8 @@ pub unsafe trait OwnedStorage<A, B> : Default {
     ///
     /// Once this function is called, the given `ptr` is considered invalid and
     /// any further use is undefined.
+    ///
+    /// This call must not panic (assuming the input contract is satisfied).
     unsafe fn deallocate_a(&mut self, ptr: *mut ());
     /// See `deallocate_b`.
     unsafe fn deallocate_b(&mut self, ptr: *mut ());

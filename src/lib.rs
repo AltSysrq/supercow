@@ -753,38 +753,60 @@ use self::ext::*;
 /// If `Clone` is listed, the trait gains a `clone_boxed()` method and
 /// `Box<FeatureName>` is `Clone`.
 ///
+/// If `TwoStepShared(SomeType)` is listed, the boxed type will implement
+/// `TwoStepShared` for all `OWNED`/`BORROWED` pairs where
+/// `SomeType<OWNED,BORROWED>` implements the feature a whole and
+/// `OWNED: Borrow<BORROWED>`.
+///
 /// All types which implement all the listed traits (including special cases)
 /// and `ConstDeref` implement `FeatureName`.
 #[macro_export]
 macro_rules! supercow_features {
-    ($(#[$meta:meta])* pub trait $feature_name:ident: $($stuff:ident),*) => {
+    ($(#[$meta:meta])* pub trait $feature_name:ident: $($stuff:tt)*) => {
         supercow_features!(@_ACCUM $(#[$meta])* pub trait $feature_name:
-                           [] [] $($stuff),*);
+                           [] [] [] $($stuff)*);
     };
 
     (@_ACCUM $(#[$meta:meta])* pub trait $feature_name:ident:
-     $clone:tt [$($others:tt),*] Clone $(, $more:ident)*) => {
+     $clone:tt $twostep:tt [$($others:tt),*] Clone $($more:tt)*) => {
         supercow_features!(@_ACCUM $(#[$meta])* pub trait $feature_name:
-                           [Clone clone_boxed] [$($others)*]
-                           $($more),*);
+                           [Clone clone_boxed] $twostep [$($others)*]
+                           $($more)*);
     };
 
     (@_ACCUM $(#[$meta:meta])* pub trait $feature_name:ident:
-     $clone:tt [$($others:ident),*] $other:ident $(, $more:tt)*) => {
+     $clone:tt $twostep:tt [$($others:tt),*]
+     TwoStepShared($($inner:tt)*)
+     $($more:tt)*) => {
         supercow_features!(@_ACCUM $(#[$meta])* pub trait $feature_name:
-                           $clone [$($others, )* $other]
-                           $($more),*);
+                           $clone [$($inner)*] [$($others)*]
+                           $($more)*);
     };
 
     (@_ACCUM $(#[$meta:meta])* pub trait $feature_name:ident:
-     $clone:tt [$($others:ident),*]) => {
+     $clone:tt $twostep:tt [$($others:tt),*], $($more:tt)*) => {
+        supercow_features!(@_ACCUM $(#[$meta])* pub trait $feature_name:
+                           $clone $twostep [$($others)*] $($more)*);
+    };
+
+    (@_ACCUM $(#[$meta:meta])* pub trait $feature_name:ident:
+     $clone:tt $twostep:tt [$($others:ident),*] $other:ident $($more:tt)*) => {
+        supercow_features!(@_ACCUM $(#[$meta])* pub trait $feature_name:
+                           $clone $twostep [$($others, )* $other]
+                           $($more)*);
+    };
+
+    (@_ACCUM $(#[$meta:meta])* pub trait $feature_name:ident:
+     $clone:tt $twostep:tt [$($others:ident),*]) => {
         supercow_features!(@_DEFINE $(#[$meta])* pub trait $feature_name:
-                           $clone [$($others),*]);
+                           $clone $twostep [$($others),*]);
     };
 
     (@_DEFINE $(#[$meta:meta])*
      pub trait $feature_name:ident:
-     [$($clone:ident $clone_boxed:ident)*] [$($req:ident),*]) => {
+     [$($clone:ident $clone_boxed:ident)*]
+     [$($twostep_inner:ident)*]
+     [$($req:ident),*]) => {
         $(#[$meta])*
         pub trait $feature_name<'a>: $($req +)* $crate::ext::ConstDeref + 'a {
             $(
@@ -794,8 +816,14 @@ macro_rules! supercow_features {
                 (&self)
                  -> Box<$feature_name<'a, Target = Self::Target> + 'a>;
             )*
+
+            /// Returns the address of `self`.
+            ///
+            /// This is used to disassemble trait objects of this trait without
+            /// resorting to transuting or the unstable `TraitObject` type.
+            fn self_address_mut(&mut self) -> *mut ();
         }
-        impl<'a, T : 'a + $($req +)* $($clone +)* $crate::ext::ConstDeref>
+        impl<'a, T : 'a + $($req +)* $($clone +)* $crate::ext::ConstDeref + Sized>
         $feature_name<'a> for T {
             $(
             fn $clone_boxed
@@ -806,6 +834,10 @@ macro_rules! supercow_features {
                 Box::new(cloned)
             }
             )*
+
+            fn self_address_mut(&mut self) -> *mut () {
+                self as *mut Self as *mut ()
+            }
         }
         impl<'a, T : $feature_name<'a>> $crate::ext::SharedFrom<T>
         for Box<$feature_name<'a, Target = T::Target> + 'a> {
@@ -817,6 +849,25 @@ macro_rules! supercow_features {
         impl<'a, S : 'a + ?Sized> $clone for Box<$feature_name<'a, Target = S> + 'a> {
             fn clone(&self) -> Self {
                 $feature_name::clone_boxed(&**self)
+            }
+        }
+        )*
+        $(
+        impl<'a, S : 'a + ?Sized, T : 'a> $crate::ext::TwoStepShared<T>
+        for Box<$feature_name<'a, Target = S> + 'a>
+        where T : ::std::borrow::Borrow<S>,
+              $twostep_inner<T,S> : $feature_name<'a, Target = S> {
+            fn new_two_step() -> Self {
+                Box::new(
+                    <$twostep_inner<T,S> as $crate::ext::TwoStepShared<T>>::
+                    new_two_step())
+            }
+
+            unsafe fn deref_holder(&mut self) -> &mut Option<T> {
+                <$twostep_inner<T,S> as $crate::ext::TwoStepShared<T>>::
+                deref_holder(
+                    &mut* ($feature_name::self_address_mut(&mut **self)
+                           as *mut $twostep_inner<T,S>))
             }
         }
         )*
@@ -832,13 +883,13 @@ supercow_features!(
     /// issue than the `Supercow` not being `Send` or `Sync`.
     ///
     /// See also `NonSyncFeatures`.
-    pub trait DefaultFeatures: Clone, Send, Sync);
+    pub trait DefaultFeatures: Clone, TwoStepShared(TwoStepArc), Send, Sync);
 supercow_features!(
     /// The shared reference type for `NonSyncSupercow`.
     ///
     /// Unlike `DefaultFeatures`, this only requires the shared reference type
     /// to be `Clone`, thus permitting `Rc`.
-    pub trait NonSyncFeatures: Clone);
+    pub trait NonSyncFeatures: Clone, TwoStepShared(TwoStepRc));
 
 /// `Supercow` with the default `SHARED` changed to `NonSyncFeatures`, enabling
 /// the use of `Rc` as a shared reference type as well as making it possible to
@@ -1171,6 +1222,77 @@ defimpl! {[] () where { } {
             Shared(s) => Some(Self::shared_nocvt(unsafe {
                 this.storage.get_ptr_b(s)
             }.clone())),
+        }
+    }
+
+    /// Logically clone `this` without needing to clone `OWNED`.
+    ///
+    /// If this `Supercow` is in owned mode, the owned value is first moved
+    /// into a new shared reference so that `OWNED` does not need to be cloned.
+    ///
+    /// ## Example
+    ///
+    /// ```
+    /// use supercow::Supercow;
+    ///
+    /// struct NonCloneType(u32);
+    ///
+    /// let mut first: Supercow<NonCloneType> =
+    ///   Supercow::owned(NonCloneType(42));
+    /// let second = Supercow::share(&mut first);
+    ///
+    /// assert_eq!(42, (*first).0);
+    /// assert_eq!(42, (*second).0);
+    /// ```
+    pub fn share(this: &mut Self) -> Self
+    where SHARED : Clone + ConstDeref<Target = BORROWED> +
+                   TwoStepShared<OWNED> {
+        match this.mode() {
+            Owned(ptr) => {
+                let unboxed = SHARED::new_two_step();
+                let mut new_storage: STORAGE = Default::default();
+                let shared_ptr = new_storage.allocate_b(unboxed);
+                {
+                    // `deref_holder` is technically allowed to panic. In
+                    // practise it isn't expected to since any implementation
+                    // would be trivial. If it *does*, we're still safe, but we
+                    // may leak the storage allocated above.
+                    let holder = unsafe {
+                        new_storage.get_mut_b(shared_ptr)
+                            .deref_holder()
+                    };
+
+                    // These steps need to be uninterupted by safe function
+                    // calls, as any panics would result in dangling pointers.
+                    *holder = Some(unsafe {
+                        this.storage.deallocate_into_a(ptr)
+                    });
+                }
+                this.storage = new_storage;
+                this.mode = (1usize | (shared_ptr as usize)) as *mut ();
+                this.ptr = unsafe { &*(
+                    this.storage.get_ptr_b(shared_ptr)
+                        .const_deref()
+                        as *const BORROWED
+                )};
+                // End uninterrupted section
+
+                Self::shared_nocvt(unsafe {
+                    this.storage.get_ptr_b(shared_ptr)
+                }.clone())
+            },
+
+            Borrowed => Supercow {
+                ptr: this.ptr,
+                mode: this.mode,
+                storage: Default::default(),
+                _owned: PhantomData,
+                _shared: PhantomData,
+            },
+
+            Shared(s) => Self::shared_nocvt(unsafe {
+                this.storage.get_ptr_b(s)
+            }.clone()),
         }
     }
 
@@ -1553,13 +1675,72 @@ defphantomimpl! {[] () where { } {
             Borrowed => (),
 
             Shared(ptr) => {
-                let m = clone.storage.allocate_b(
-                    unsafe { self.storage.get_ptr_b(ptr) }.clone());
-                clone.mode = (1usize | (m as usize)) as *mut ();
+                clone.set_shared(unsafe {
+                    self.storage.get_ptr_b(ptr)
+                }.clone());
             },
         }
 
         Some(clone)
+    }
+
+    /// Makes a copy of this `Phantomcow`, making it shared if currently owned.
+    pub fn share(&mut self) -> Self
+    where SHARED : Clone + TwoStepShared<OWNED> {
+        // TODO It would be nice if there were a reasonable way to abstract
+        // over this and `Supercow` instead of needing to copy-paste things
+        // like this.
+        let mut clone: Self = Phantomcow {
+            mode: ptr::null_mut(),
+            storage: Default::default(),
+            _owned: PhantomData,
+            _borrowed: PhantomData,
+            _shared: PhantomData,
+        };
+
+        match SupercowMode::from_ptr(self.mode) {
+            Owned(ptr) => {
+                let unboxed = SHARED::new_two_step();
+                let mut new_storage: STORAGE = Default::default();
+                let shared_ptr = new_storage.allocate_b(unboxed);
+                {
+                    // `deref_holder` is technically allowed to panic. In
+                    // practise it isn't expected to since any implementation
+                    // would be trivial. If it *does*, we're still safe, but we
+                    // may leak the storage allocated above.
+                    let holder = unsafe {
+                        new_storage.get_mut_b(shared_ptr)
+                            .deref_holder()
+                    };
+
+                    // These steps need to be uninterupted by safe function
+                    // calls, as any panics would result in dangling pointers.
+                    *holder = Some(unsafe {
+                        self.storage.deallocate_into_a(ptr)
+                    });
+                }
+                self.storage = new_storage;
+                self.mode = (1usize | (shared_ptr as usize)) as *mut ();
+                // End uninterrupted section
+
+                clone.set_shared(unsafe { self.storage.get_ptr_b(shared_ptr) }
+                                 .clone());
+            },
+
+            Borrowed => { },
+
+            Shared(s) => {
+                clone.set_shared(unsafe { self.storage.get_ptr_b(s) }
+                                 .clone());
+            }
+        }
+
+        clone
+    }
+
+    fn set_shared(&mut self, shared: SHARED) {
+        let m = self.storage.allocate_b(shared);
+        self.mode = (1usize | (m as usize)) as *mut ();
     }
 } }
 
@@ -2014,6 +2195,80 @@ mod $modname {
         let p1 = Supercow::phantom(sc);
         assert!(p1.clone_non_owned().is_some());
         let _p2 = p1.clone();
+    }
+
+    struct NotCloneable(u32);
+    impl Drop for NotCloneable {
+        fn drop(&mut self) {
+            self.0 = 0;
+        }
+    }
+
+    #[test]
+    fn share_owned_supercow() {
+        let mut a: $stype<NotCloneable> = Supercow::owned(NotCloneable(42));
+        let b = Supercow::share(&mut a);
+
+        assert_eq!(42, (*a).0);
+        assert_eq!(42, (*b).0);
+    }
+
+    #[test]
+    fn share_borrowed_supercow() {
+        let nc = NotCloneable(42);
+        let mut a: $stype<NotCloneable> = Supercow::borrowed(&nc);
+        let b = Supercow::share(&mut a);
+
+        assert_eq!(42, (*a).0);
+        assert_eq!(42, (*b).0);
+    }
+
+    #[test]
+    fn share_shared_supercow() {
+        let mut a: $stype<NotCloneable> = Supercow::shared(
+            Arc::new(NotCloneable(42)));
+        let b = Supercow::share(&mut a);
+
+        assert_eq!(42, (*a).0);
+        assert_eq!(42, (*b).0);
+    }
+
+    #[test]
+    fn share_owned_dst_supercow() {
+        let mut a: $stype<String, str> = Supercow::owned("hello world".into());
+        let b = Supercow::share(&mut a);
+
+        assert_eq!("hello world", &*a);
+        assert_eq!("hello world", &*b);
+    }
+
+    #[test]
+    fn share_owned_phantomcow() {
+        let mut a: $ptype<NotCloneable> =
+            Supercow::phantom(Supercow::owned(NotCloneable(42)));
+        let _b = a.share();
+    }
+
+    #[test]
+    fn share_borrowed_phantomcow() {
+        let nc = NotCloneable(42);
+        let mut a: $ptype<NotCloneable> =
+            Supercow::phantom(Supercow::borrowed(&nc));
+        let _b = a.share();
+    }
+
+    #[test]
+    fn share_shared_phantomcow() {
+        let mut a: $ptype<NotCloneable> = Supercow::phantom(
+            Supercow::shared(Arc::new(NotCloneable(42))));
+        let _b = a.share();
+    }
+
+    #[test]
+    fn share_owned_dst_phantomcow() {
+        let mut a: $ptype<String, str> =
+            Supercow::phantom(Supercow::owned("hello world".into()));
+        let _b = a.share();
     }
 } } }
 
