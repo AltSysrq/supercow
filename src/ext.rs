@@ -7,7 +7,7 @@
 // except according to those terms.
 
 //! Miscelaneous things used to integrate other code with Supercow, but which
-//! are not of interest to end users.
+//! are not of interest to most client developers.
 
 use std::borrow::Borrow;
 use std::ffi::{CStr, OsStr};
