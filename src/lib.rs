@@ -691,12 +691,10 @@
 //! use supercow::InlineSupercow;
 //!
 //! // Define our structures
-//! // (The extra lifetimes are needed for intra-function lifetime inference to
-//! // succeed.)
 //! struct Big([u8;1024]);
 //! struct A<'a>(InlineSupercow<'a, Big>);
-//! struct B<'b,'a:'b>(InlineSupercow<'b, A<'a>>);
-//! struct C<'b,'a:'b>(InlineSupercow<'b, B<'a,'a>>);
+//! struct B<'a>(InlineSupercow<'a, A<'a>>);
+//! struct C<'a>(InlineSupercow<'a, B<'a>>);
 //!
 //! // Now say an API consumer, etc, decides to use references
 //! let big = Big([0u8;1024]);
@@ -754,7 +752,7 @@ use self::ext::*;
 /// ## Semantics
 ///
 /// A public trait named `FeatureName` is defined which extends all the listed
-/// traits, minus special cases below, and in addition to `ConstDeref`.
+/// traits, minus special cases below.
 ///
 /// If `Clone` is listed, the trait gains a `clone_boxed()` method and
 /// `Box<FeatureName>` is `Clone`.
@@ -762,10 +760,19 @@ use self::ext::*;
 /// If `TwoStepShared(SomeType)` is listed, the boxed type will implement
 /// `TwoStepShared` for all `OWNED`/`BORROWED` pairs where
 /// `SomeType<OWNED,BORROWED>` implements the feature a whole and
-/// `OWNED: Borrow<BORROWED>`.
+/// `OWNED: SafeBorrow<BORROWED>`.
 ///
 /// All types which implement all the listed traits (including special cases)
-/// and `ConstDeref` implement `FeatureName`.
+/// implement `FeatureName`.
+
+// Historical note: Originally, the shared type was required to implement
+// `ConstDeref`, and so the shared type was `Box<$feature<Target = BORROWED>>`.
+// This mostly worked, but it confused lifetime inferrence in a number of
+// cases, particularly surrounding variance. Because of that, we instead have
+// stricter requirements on a number of traits (including making `SharedFrom`
+// unsafe) so that we can pull the pointer out of the non-boxed shared
+// reference and hold onto it thereon out, thus obviating the need for `SHARED`
+// to carry that part of the type information.
 #[macro_export]
 macro_rules! supercow_features {
     ($(#[$meta:meta])* pub trait $feature_name:ident: $($stuff:tt)*) => {
@@ -814,13 +821,11 @@ macro_rules! supercow_features {
      [$($twostep_inner:ident)*]
      [$($req:ident),*]) => {
         $(#[$meta])*
-        pub trait $feature_name<'a>: $($req +)* $crate::ext::ConstDeref + 'a {
+        pub trait $feature_name<'a>: $($req +)* 'a {
             $(
             /// Clone this value, and then immediately put it into a `Box`
             /// behind a trait object of this trait.
-            fn $clone_boxed
-                (&self)
-                 -> Box<$feature_name<'a, Target = Self::Target> + 'a>;
+            fn $clone_boxed(&self) -> Box<$feature_name<'a> + 'a>;
             )*
 
             /// Returns the address of `self`.
@@ -829,13 +834,10 @@ macro_rules! supercow_features {
             /// resorting to transmuting or the unstable `TraitObject` type.
             fn self_address_mut(&mut self) -> *mut ();
         }
-        impl<'a, T : 'a + $($req +)* $($clone +)* $crate::ext::ConstDeref + Sized>
+        impl<'a, T : 'a + $($req +)* $($clone +)* Sized>
         $feature_name<'a> for T {
             $(
-            fn $clone_boxed
-                (&self)
-                 -> Box<$feature_name<'a, Target = Self::Target> + 'a>
-            {
+            fn $clone_boxed(&self) -> Box<$feature_name<'a> + 'a> {
                 let cloned: T = self.clone();
                 Box::new(cloned)
             }
@@ -845,32 +847,32 @@ macro_rules! supercow_features {
                 self as *mut Self as *mut ()
             }
         }
-        impl<'a, T : $feature_name<'a>> $crate::ext::SharedFrom<T>
-        for Box<$feature_name<'a, Target = T::Target> + 'a> {
+        unsafe impl<'a, T : $feature_name<'a>> $crate::ext::SharedFrom<T>
+        for Box<$feature_name<'a> + 'a> {
             fn shared_from(t: T) -> Self {
                 Box::new(t)
             }
         }
         $(
-        impl<'a, S : 'a + ?Sized> $clone for Box<$feature_name<'a, Target = S> + 'a> {
+        impl<'a> $clone for Box<$feature_name<'a> + 'a> {
             fn clone(&self) -> Self {
                 $feature_name::clone_boxed(&**self)
             }
         }
         )*
         $(
-        impl<'a, S : 'a + ?Sized, T : 'a> $crate::ext::TwoStepShared<T>
-        for Box<$feature_name<'a, Target = S> + 'a>
-        where T : ::std::borrow::Borrow<S>,
-              $twostep_inner<T,S> : $feature_name<'a, Target = S> {
+        impl<'a, S : 'a + ?Sized, T : 'a> $crate::ext::TwoStepShared<T, S>
+        for Box<$feature_name<'a> + 'a>
+        where T : $crate::ext::SafeBorrow<S>,
+              $twostep_inner<T,S> : $feature_name<'a> {
             fn new_two_step() -> Self {
                 Box::new(
-                    <$twostep_inner<T,S> as $crate::ext::TwoStepShared<T>>::
+                    <$twostep_inner<T,S> as $crate::ext::TwoStepShared<T, S>>::
                     new_two_step())
             }
 
             unsafe fn deref_holder(&mut self) -> &mut Option<T> {
-                <$twostep_inner<T,S> as $crate::ext::TwoStepShared<T>>::
+                <$twostep_inner<T,S> as $crate::ext::TwoStepShared<T, S>>::
                 deref_holder(
                     &mut* ($feature_name::self_address_mut(&mut **self)
                            as *mut $twostep_inner<T,S>))
@@ -916,7 +918,7 @@ supercow_features!(
 /// ```
 pub type NonSyncSupercow<'a, OWNED, BORROWED = OWNED> =
     Supercow<'a, OWNED, BORROWED,
-             Box<NonSyncFeatures<'static, Target = BORROWED> + 'static>,
+             Box<NonSyncFeatures<'static> + 'static>,
              BoxedStorage>;
 
 /// `Supercow` with the default `STORAGE` changed to `InlineStorage`.
@@ -926,8 +928,7 @@ pub type NonSyncSupercow<'a, OWNED, BORROWED = OWNED> =
 /// `SHARED` still has its own `Box`) at the cost of bloating the `Supercow`
 /// itself, as it now needs to be able to fit a whole `OWNED` instance.
 pub type InlineSupercow<'a, OWNED, BORROWED = OWNED,
-                       SHARED = Box<DefaultFeatures<
-                           'static, Target = BORROWED> + 'static>> =
+                       SHARED = Box<DefaultFeatures<'static> + 'static>> =
     Supercow<'a, OWNED, BORROWED, SHARED, InlineStorage<OWNED, SHARED>>;
 
 /// `NonSyncSupercow` with the `STORAGE` changed to `InlineStorage`.
@@ -935,9 +936,8 @@ pub type InlineSupercow<'a, OWNED, BORROWED = OWNED,
 /// This combines both properties of `NonSyncSupercow` and `InlineSupercow`.
 pub type InlineNonSyncSupercow<'a, OWNED, BORROWED = OWNED> =
     Supercow<'a, OWNED, BORROWED,
-             Box<NonSyncFeatures<'static, Target = BORROWED> + 'static>,
-             InlineStorage<OWNED, Box<
-                 NonSyncFeatures<'static, Target = BORROWED> + 'static>>>;
+             Box<NonSyncFeatures<'static> + 'static>,
+             InlineStorage<OWNED, Box<NonSyncFeatures<'static> + 'static>>>;
 
 /// The actual generic reference type.
 ///
@@ -955,8 +955,7 @@ pub type InlineNonSyncSupercow<'a, OWNED, BORROWED = OWNED> =
 /// - `PTR : PtrRead<BORROWED>` means the operation is not available on
 /// `Phantomcow`.
 pub struct Supercow<'a, OWNED, BORROWED : ?Sized = OWNED,
-                    SHARED = Box<DefaultFeatures<
-                        'static, Target = BORROWED> + 'static>,
+                    SHARED = Box<DefaultFeatures<'static> + 'static>,
                     STORAGE = BoxedStorage, PTR = *const BORROWED>
 where BORROWED : 'a,
       *const BORROWED : PointerFirstRef,
@@ -1038,29 +1037,24 @@ where BORROWED : 'a,
 /// corresponding `Supercow` type minus the size of `&'a BORROWED`, though this
 /// may not be exact depending on `STORAGE` alignment, etc.
 pub type Phantomcow<'a, OWNED, BORROWED = OWNED,
-                    SHARED = Box<DefaultFeatures<
-                        'static, Target = BORROWED> + 'static>,
+                    SHARED = Box<DefaultFeatures<'static> + 'static>,
                     STORAGE = BoxedStorage> =
     Supercow<'a, OWNED, BORROWED, SHARED, STORAGE, ()>;
 
 /// The `Phantomcow` variant corresponding to `NonSyncSupercow`.
 pub type NonSyncPhantomcow<'a, OWNED, BORROWED = OWNED> =
-    Phantomcow<'a, OWNED, BORROWED,
-               Box<NonSyncFeatures<'static, Target = BORROWED> + 'static>,
+    Phantomcow<'a, OWNED, BORROWED, Box<NonSyncFeatures<'static> + 'static>,
                BoxedStorage>;
 
 /// The `Phantomcow` variant corresponding to `InlineStorage`.
 pub type InlinePhantomcow<'a, OWNED, BORROWED = OWNED,
-                          SHARED = Box<DefaultFeatures<
-                              'static, Target = BORROWED> + 'static>> =
+                          SHARED = Box<DefaultFeatures<'static> + 'static>> =
     Phantomcow<'a, OWNED, BORROWED, SHARED, InlineStorage<OWNED, SHARED>>;
 
 /// The `Phantomcow` variant corresponding to `InlineNonSyncSupercow`.
 pub type InlineNonSyncPhantomcow<'a, OWNED, BORROWED = OWNED> =
-    Phantomcow<'a, OWNED, BORROWED,
-             Box<NonSyncFeatures<'static, Target = BORROWED> + 'static>,
-             InlineStorage<OWNED, Box<
-                 NonSyncFeatures<'static, Target = BORROWED> + 'static>>>;
+    Phantomcow<'a, OWNED, BORROWED, Box<NonSyncFeatures<'static> + 'static>,
+             InlineStorage<OWNED, Box<NonSyncFeatures<'static> + 'static>>>;
 
 enum SupercowMode {
     Owned(*mut ()),
@@ -1147,14 +1141,16 @@ defimpl! {[] () where { } {
     ///
     /// The reference must be convertable to `SHARED` via `SharedFrom`.
     pub fn shared<T>(inner: T) -> Self
-    where SHARED : SharedFrom<T> + ConstDeref<Target = BORROWED> {
-        Self::shared_nocvt(SHARED::shared_from(inner))
+    where T : ConstDeref<Target = BORROWED>,
+          SHARED : SharedFrom<T> {
+        let mut ptr = PTR::new();
+        ptr.store_ptr(inner.const_deref());
+        Self::shared_nocvt(SHARED::shared_from(inner), ptr)
     }
 
-    fn shared_nocvt(shared: SHARED) -> Self
-    where SHARED : ConstDeref<Target = BORROWED> {
+    fn shared_nocvt(shared: SHARED, ptr: PTR) -> Self {
         let mut this = unsafe { Self::empty() };
-        this.ptr.store_ptr(shared.const_deref() as *const BORROWED);
+        this.ptr = ptr;
 
         let nominal_mode = this.storage.allocate_b(shared);
         this.mode = (1usize | (nominal_mode as usize)) as *mut ();
@@ -1180,7 +1176,7 @@ defimpl! {[] () where { } {
     /// let also_borrowed = Supercow::clone_non_owned(&borrowed).unwrap();
     /// ```
     pub fn clone_non_owned(this: &Self) -> Option<Self>
-    where SHARED : Clone + ConstDeref<Target = BORROWED> {
+    where SHARED : Clone {
         match this.mode() {
             Owned(_) => None,
 
@@ -1195,7 +1191,7 @@ defimpl! {[] () where { } {
 
             Shared(s) => Some(Self::shared_nocvt(unsafe {
                 this.storage.get_ptr_b(s)
-            }.clone())),
+            }.clone(), this.ptr)),
         }
     }
 
@@ -1219,13 +1215,14 @@ defimpl! {[] () where { } {
     /// assert_eq!(42, (*second).0);
     /// ```
     pub fn share(this: &mut Self) -> Self
-    where SHARED : Clone + ConstDeref<Target = BORROWED> +
-                   TwoStepShared<OWNED> {
+    where OWNED : SafeBorrow<BORROWED>,
+          SHARED : Clone + TwoStepShared<OWNED, BORROWED> {
         match this.mode() {
             Owned(ptr) => {
                 let unboxed = SHARED::new_two_step();
                 let mut new_storage: STORAGE = Default::default();
                 let shared_ptr = new_storage.allocate_b(unboxed);
+                let internal_ptr: *const BORROWED;
                 {
                     // `deref_holder` is technically allowed to panic. In
                     // practise it isn't expected to since any implementation
@@ -1241,19 +1238,17 @@ defimpl! {[] () where { } {
                     *holder = Some(unsafe {
                         this.storage.deallocate_into_a(ptr)
                     });
+                    // TODO This is in a rather precarious place.
+                    internal_ptr = holder.as_ref().unwrap().borrow();
                 }
                 this.storage = new_storage;
                 this.mode = (1usize | (shared_ptr as usize)) as *mut ();
-                this.ptr.store_ptr(unsafe {
-                    this.storage.get_ptr_b(shared_ptr)
-                        .const_deref()
-                        as *const BORROWED
-                });
+                this.ptr.store_ptr(internal_ptr);
                 // End uninterrupted section
 
                 Self::shared_nocvt(unsafe {
                     this.storage.get_ptr_b(shared_ptr)
-                }.clone())
+                }.clone(), this.ptr)
             },
 
             Borrowed => Supercow {
@@ -1267,7 +1262,7 @@ defimpl! {[] () where { } {
 
             Shared(s) => Self::shared_nocvt(unsafe {
                 this.storage.get_ptr_b(s)
-            }.clone()),
+            }.clone(), this.ptr),
         }
     }
 
@@ -1378,7 +1373,7 @@ defimpl! {[] () where { } {
     /// };
     /// assert_eq!(42, *s);
     /// ```
-    pub fn take_ownership<NS : ConstDeref<Target = BORROWED>>
+    pub fn take_ownership<NS>
         (mut this: Self) -> Supercow<'static, OWNED, BORROWED, NS, STORAGE, PTR>
     where OWNED : SafeBorrow<BORROWED>,
           BORROWED : ToOwned<Owned = OWNED>,
@@ -1443,7 +1438,7 @@ defimpl! {[] () where { } {
 
     unsafe fn empty() -> Self {
         Supercow {
-            ptr: mem::uninitialized(),
+            ptr: PTR::new(),
             mode: ptr::null_mut(),
             storage: Default::default(),
             _owned: PhantomData,
@@ -1545,7 +1540,7 @@ defimpl! {[] (AsRef<BORROWED> for) where {
 
 defimpl! {[] (Clone for) where {
     OWNED : Clone + SafeBorrow<BORROWED>,
-    SHARED : Clone + ConstDeref<Target = BORROWED>,
+    SHARED : Clone,
 } {
     fn clone(&self) -> Self {
         match self.mode() {
@@ -1564,7 +1559,7 @@ defimpl! {[] (Clone for) where {
 
             Shared(s) => Self::shared_nocvt(unsafe {
                 self.storage.get_ptr_b(s)
-            }.clone()),
+            }.clone(), self.ptr),
         }
     }
 } }
@@ -1597,7 +1592,7 @@ defimpl! {[] (From<&'a OWNED> for) where {
 // coerces into `SHARED`. Again, maybe one day after specialisation..
 impl<'a, OWNED, SHARED, STORAGE> From<Rc<OWNED>>
 for Supercow<'a, OWNED, OWNED, SHARED, STORAGE>
-where SHARED : ConstDeref<Target = OWNED> + SharedFrom<Rc<OWNED>>,
+where SHARED : SharedFrom<Rc<OWNED>>,
       STORAGE : OwnedStorage<OWNED, SHARED>,
       OWNED : 'a,
       *const OWNED : PointerFirstRef {
@@ -1607,7 +1602,7 @@ where SHARED : ConstDeref<Target = OWNED> + SharedFrom<Rc<OWNED>>,
 }
 impl<'a, OWNED, SHARED, STORAGE> From<Arc<OWNED>>
 for Supercow<'a, OWNED, OWNED, SHARED, STORAGE>
-where SHARED : ConstDeref<Target = OWNED> + SharedFrom<Arc<OWNED>>,
+where SHARED : SharedFrom<Arc<OWNED>>,
       STORAGE : OwnedStorage<OWNED, SHARED>,
       OWNED : 'a,
       *const OWNED : PointerFirstRef {

@@ -22,16 +22,16 @@ use std::sync::Arc;
 /// Marker trait indicating a `Deref`-like which always returns the same
 /// reference.
 ///
-/// This is not indended for general use outside Supercow. Notably, `Box` and
-/// mundane references satisfy this trait's requirements, but deliberately do
-/// not implement it. It is also not a subtrait of `Deref` due to some
-/// additional special logic around boxes.
+/// This is not indended for general use outside Supercow. Notably, mundane
+/// references satisfy this trait's requirements, but deliberately do not
+/// implement it. It is also not a subtrait of `Deref` due to some additional
+/// special logic around boxes.
 ///
 /// ## Unsafety
 ///
 /// Behaviour is undefined if the implementation does not always return the
 /// same reference from `deref()` for any particular implementing value
-/// (including if that value is moved).
+/// (including if that value is moved or cloned).
 pub unsafe trait ConstDeref {
     /// The type this value dereferences to.
     type Target : ?Sized;
@@ -56,6 +56,7 @@ unsafe impl<T : ConstDeref + ?Sized> ConstDeref for Box<T> {
     }
 }
 
+
 /// Trait for `ConstDeref` implementations which can be constructed in a
 /// two-step process.
 ///
@@ -66,7 +67,7 @@ unsafe impl<T : ConstDeref + ?Sized> ConstDeref for Box<T> {
 ///
 /// Essentially, such shared references actaully hold an `Option<Target>` which
 /// defaults to `None`, and panic if dereffed before the value is set.
-pub trait TwoStepShared<T> : ConstDeref {
+pub trait TwoStepShared<OWNED, BORROWED : ?Sized> {
     /// Returns a new, empty instance of `Self`.
     fn new_two_step() -> Self;
     /// Returns the internal `Option<T>` backing this value.
@@ -77,32 +78,22 @@ pub trait TwoStepShared<T> : ConstDeref {
     /// `new_two_step` on the same trait. (This is to allow downcasting without
     /// requiring `Any` which in turn requires `'static`.)
     ///
-    /// The implementation must guarantee that, after `Some(T)` is written into
-    /// the returned reference, the `const_deref()` method will never panic.
-    unsafe fn deref_holder(&mut self) -> &mut Option<T>;
+    /// The address of the value inside `Some` may not be altered by the
+    /// implementation.
+    unsafe fn deref_holder(&mut self) -> &mut Option<OWNED>;
 }
 
 macro_rules! twostepwrapper { ($outer:ident, $inner:ident) => {
     /// Wrapper providing a `TwoStepShared` implementation.
     pub struct $outer<T, B : ?Sized>($inner<Option<T>>, PhantomData<B>);
-    unsafe impl<T, B : ?Sized> ConstDeref for $outer<T, B>
-    where T : Borrow<B> {
-        type Target = B;
-        fn const_deref(&self) -> &B {
-            self.0.const_deref()
-                .as_ref()
-                .expect("Uninitialised two-step wrapper")
-                .borrow()
-        }
-    }
     impl<T, B : ?Sized> Clone for $outer<T, B> {
         fn clone(&self) -> Self {
             $outer(self.0.clone(), PhantomData)
         }
     }
 
-    impl<T, B : ?Sized> TwoStepShared<T> for $outer<T, B>
-    where T : Borrow<B> {
+    impl<T, B : ?Sized> TwoStepShared<T, B> for $outer<T, B>
+    where T : SafeBorrow<B> {
         fn new_two_step() -> Self {
             $outer($inner::new(None), PhantomData)
         }
@@ -207,14 +198,19 @@ unsafe impl PointerFirstRef for *const ::std::path::Path { }
 
 /// Like `std::convert::From`, but without the blanket implementations that
 /// cause problems for `supercow_features!`.
-pub trait SharedFrom<T> {
+///
+/// ## Unsafety
+///
+/// The conversion may not invalidate the address returned by
+/// `T::const_deref()`.
+pub unsafe trait SharedFrom<T> {
     /// Converts the given `T` to `Self`.
     fn shared_from(t: T) -> Self;
 }
-impl <T> SharedFrom<Rc<T>> for Rc<T> {
+unsafe impl <T> SharedFrom<Rc<T>> for Rc<T> {
     fn shared_from(t: Rc<T>) -> Rc<T> { t }
 }
-impl <T> SharedFrom<Arc<T>> for Arc<T> {
+unsafe impl <T> SharedFrom<Arc<T>> for Arc<T> {
     fn shared_from(t: Arc<T>) -> Arc<T> { t }
 }
 
@@ -486,6 +482,9 @@ unsafe impl<A, B> OwnedStorage<A, B> for BoxedStorage {
 /// It is doubtful that there are any types besides `()` and `*mut T` which
 /// could implement this usefully.
 pub unsafe trait PtrWrite<T : ?Sized> : Copy {
+    /// Returns an instance of `Self` with no particular value.
+    fn new() -> Self;
+
     /// Writes the given reference into `self`.
     ///
     /// ## Unsafety
@@ -497,10 +496,18 @@ pub unsafe trait PtrWrite<T : ?Sized> : Copy {
 
 unsafe impl<T : ?Sized> PtrWrite<T> for () {
     #[inline(always)]
+    fn new() -> Self { () }
+
+    #[inline(always)]
     fn store_ptr(&mut self, _: *const T) { }
 }
 
 unsafe impl<T : ?Sized> PtrWrite<T> for *const T {
+    #[inline(always)]
+    fn new() -> Self {
+        unsafe { mem::uninitialized() }
+    }
+
     #[inline(always)]
     fn store_ptr(&mut self, t: *const T) {
         *self = t;
