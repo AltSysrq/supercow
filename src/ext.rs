@@ -98,26 +98,26 @@ unsafe impl<T> SafeBorrow<str> for T where T : Borrow<str> {
     fn borrow_replacement(_: &str) -> &str { "" }
 }
 unsafe impl<T> SafeBorrow<CStr> for T
-    where T : Borrow<CStr> {
-        fn borrow_replacement(_: &CStr) -> &CStr {
+where T : Borrow<CStr> {
+    fn borrow_replacement(_: &CStr) -> &CStr {
         static EMPTY_CSTR: &'static [u8] = &[0];
         unsafe {
             CStr::from_bytes_with_nul_unchecked(EMPTY_CSTR)
         }
     }
-    }
+}
 unsafe impl<T> SafeBorrow<OsStr> for T
-    where T : Borrow<OsStr> {
-            fn borrow_replacement(_: &OsStr) -> &OsStr {
-                OsStr::new("")
-            }
-        }
+where T : Borrow<OsStr> {
+    fn borrow_replacement(_: &OsStr) -> &OsStr {
+        OsStr::new("")
+    }
+}
 unsafe impl<T> SafeBorrow<Path> for T
-    where T : Borrow<Path> {
-                fn borrow_replacement(_: &Path) -> &Path {
-                Path::new("")
-            }
-            }
+where T : Borrow<Path> {
+    fn borrow_replacement(_: &Path) -> &Path {
+        Path::new("")
+    }
+}
 
 /// Marker trait identifying a reference type which begins with an absolute
 /// address and contains no other address-dependent information.
