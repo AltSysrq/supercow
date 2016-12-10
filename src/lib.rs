@@ -737,7 +737,7 @@ use self::ext::*;
 ///   /// Some documentation, etc, if desired.
 ///   pub trait FeatureName: SomeTrait, AnotherTrait);
 /// supercow_features!(
-///   pub trait FeatureName2: Clone, SomeTrait, AnotherTrait);
+///   pub trait FeatureName2: SomeTrait, Clone, AnotherTrait);
 ///
 /// # fn main() { }
 /// ```
@@ -745,33 +745,64 @@ use self::ext::*;
 /// ## Semantics
 ///
 /// A public trait named `FeatureName` is defined which extends all the listed
-/// traits, other than `Clone`, and in addition to `ConstDeref`. If listed,
-/// `Clone` *must* come first. If `Clone` is listed, the trait gains a
-/// `clone_boxed()` method and `Box<FeatureName>` is `Clone`. All types which
-/// implement all the listed traits (including `Clone`) and `ConstDeref`
-/// implement `FeatureName`.
+/// traits, minus special cases below, and in addition to `ConstDeref`.
+///
+/// If `Clone` is listed, the trait gains a `clone_boxed()` method and
+/// `Box<FeatureName>` is `Clone`.
+///
+/// All types which implement all the listed traits (including special cases)
+/// and `ConstDeref` implement `FeatureName`.
 #[macro_export]
 macro_rules! supercow_features {
-    // It's unclear why $req:path doesn't work, but apparently constraints
-    // allow neither `path` nor `ty`.
-    ($(#[$meta:meta])* pub trait $feature_name:ident: Clone $(, $req:ident)*) => {
+    ($(#[$meta:meta])* pub trait $feature_name:ident: $($stuff:ident),*) => {
+        supercow_features!(@_ACCUM $(#[$meta])* pub trait $feature_name:
+                           [] [] $($stuff),*);
+    };
+
+    (@_ACCUM $(#[$meta:meta])* pub trait $feature_name:ident:
+     $clone:tt [$($others:tt),*] Clone $(, $more:ident)*) => {
+        supercow_features!(@_ACCUM $(#[$meta])* pub trait $feature_name:
+                           [Clone clone_boxed] [$($others)*]
+                           $($more),*);
+    };
+
+    (@_ACCUM $(#[$meta:meta])* pub trait $feature_name:ident:
+     $clone:tt [$($others:ident),*] $other:ident $(, $more:tt)*) => {
+        supercow_features!(@_ACCUM $(#[$meta])* pub trait $feature_name:
+                           $clone [$($others, )* $other]
+                           $($more),*);
+    };
+
+    (@_ACCUM $(#[$meta:meta])* pub trait $feature_name:ident:
+     $clone:tt [$($others:ident),*]) => {
+        supercow_features!(@_DEFINE $(#[$meta])* pub trait $feature_name:
+                           $clone [$($others),*]);
+    };
+
+    (@_DEFINE $(#[$meta:meta])*
+     pub trait $feature_name:ident:
+     [$($clone:ident $clone_boxed:ident)*] [$($req:ident),*]) => {
         $(#[$meta])*
         pub trait $feature_name<'a>: $($req +)* $crate::ext::ConstDeref + 'a {
+            $(
             /// Clone this value, and then immediately put it into a `Box`
             /// behind a trait object of this trait.
-            fn clone_boxed
+            fn $clone_boxed
                 (&self)
                  -> Box<$feature_name<'a, Target = Self::Target> + 'a>;
+            )*
         }
-        impl<'a, T : 'a + $($req +)* Clone + $crate::ext::ConstDeref>
+        impl<'a, T : 'a + $($req +)* $($clone +)* $crate::ext::ConstDeref>
         $feature_name<'a> for T {
-            fn clone_boxed
+            $(
+            fn $clone_boxed
                 (&self)
                  -> Box<$feature_name<'a, Target = Self::Target> + 'a>
             {
                 let cloned: T = self.clone();
                 Box::new(cloned)
             }
+            )*
         }
         impl<'a, T : $feature_name<'a>> $crate::ext::SharedFrom<T>
         for Box<$feature_name<'a, Target = T::Target> + 'a> {
@@ -779,26 +810,13 @@ macro_rules! supercow_features {
                 Box::new(t)
             }
         }
-        impl<'a, S : 'a + ?Sized> Clone for Box<$feature_name<'a, Target = S> + 'a> {
+        $(
+        impl<'a, S : 'a + ?Sized> $clone for Box<$feature_name<'a, Target = S> + 'a> {
             fn clone(&self) -> Self {
                 $feature_name::clone_boxed(&**self)
             }
         }
-    };
-
-    ($(#[$meta:meta])* pub trait $feature_name:ident: $($req:ident),*) => {
-        $(#[$meta])*
-        pub trait $feature_name<'a>: $($req +)* $crate::ext::ConstDeref + 'a {
-        }
-        impl<'a, T : 'a + $($req +)* $crate::ext::ConstDeref>
-        $feature_name<'a> for T {
-        }
-        impl<'a, T : $feature_name<'a>> $crate::ext::SharedFrom<T>
-        for Box<$feature_name<'a, Target = T::Target> + 'a> {
-            fn shared_from(t: T) -> Self {
-                Box::new(t)
-            }
-        }
+        )*
     };
 }
 
