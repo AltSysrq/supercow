@@ -947,13 +947,73 @@ where BORROWED : 'a,
     storage: STORAGE,
 
     _owned: PhantomData<OWNED>,
-    _shared: PhantomData<Box<SHARED>>,
+    _shared: PhantomData<SHARED>,
 }
+
+/// `Phantomcow<'a, Type>` is to `Supercow<'a, Type>` as
+/// `PhantomData<&'a Type>` is to `&'a Type`.
+///
+/// That is, `Phantomcow` effects a lifetime dependency on the borrowed value,
+/// while still permitting the owned and shared modes of `Supercow`, and
+/// keeping the underlying objects alive as necessary.
+///
+/// There is not much one can do with a `Phantomcow`; it can be moved around,
+/// and in some cases cloned. Its main use is in FFI wrappers, where `BORROWED`
+/// maintains some external state or resource that will be destroyed when it
+/// is, and which the owner of the `Phantomcow` depends on to function.
+///
+/// The size of a `Phantomcow` is generally equal to the size of the
+/// corresponding `Supercow` type minus the size of `&'a BORROWED`, though this
+/// may not be exact depending on `STORAGE` alignment, etc.
+pub struct Phantomcow<'a, OWNED, BORROWED : ?Sized = OWNED,
+                      SHARED = Box<DefaultFeatures<
+                          'static, Target = BORROWED> + 'static>,
+                      STORAGE = BoxedStorage>
+where BORROWED : 'a,
+      STORAGE : OwnedStorage<OWNED, SHARED> {
+    mode: *mut (),
+    storage: STORAGE,
+
+    _owned: PhantomData<OWNED>,
+    _borrowed: PhantomData<&'a BORROWED>,
+    _shared: PhantomData<SHARED>
+}
+
+/// The `Phantomcow` variant corresponding to `NonSyncSupercow`.
+pub type NonSyncPhantomcow<'a, OWNED, BORROWED = OWNED> =
+    Phantomcow<'a, OWNED, BORROWED,
+               Box<NonSyncFeatures<'static, Target = BORROWED> + 'static>,
+               BoxedStorage>;
+
+/// The `Phantomcow` variant corresponding to `InlineStorage`.
+pub type InlinePhantomcow<'a, OWNED, BORROWED = OWNED,
+                          SHARED = Box<DefaultFeatures<
+                              'static, Target = BORROWED> + 'static>> =
+    Phantomcow<'a, OWNED, BORROWED, SHARED, InlineStorage<OWNED, SHARED>>;
+
+/// The `Phantomcow` variant corresponding to `InlineNonSyncSupercow`.
+pub type InlineNonSyncPhantomcow<'a, OWNED, BORROWED = OWNED> =
+    Phantomcow<'a, OWNED, BORROWED,
+             Box<NonSyncFeatures<'static, Target = BORROWED> + 'static>,
+             InlineStorage<OWNED, Box<
+                 NonSyncFeatures<'static, Target = BORROWED> + 'static>>>;
 
 enum SupercowMode {
     Owned(*mut ()),
     Borrowed,
     Shared(*mut ()),
+}
+
+impl SupercowMode {
+    fn from_ptr(mode: *mut ()) -> Self {
+        if mode.is_null() {
+            Borrowed
+        } else if 0 == (mode as usize & 1) {
+            Owned(mode)
+        } else {
+            Shared((mode as usize & !1usize) as *mut ())
+        }
+    }
 }
 
 use self::SupercowMode::*;
@@ -972,9 +1032,32 @@ macro_rules! defimpl {
     }
 }
 
+macro_rules! defphantomimpl {
+    ($(@$us:tt)* [$($tparm:ident $(: ?$tparmsized:ident)*),*] ($($spec:tt)*)
+     where { $($wo:tt)* } $body:tt) => {
+        $($us)* impl<'a, $($tparm $(: ?$tparmsized)*,)* OWNED,
+             BORROWED : ?Sized, SHARED, STORAGE>
+            $($spec)* Phantomcow<'a, OWNED, BORROWED, SHARED, STORAGE>
+        where BORROWED : 'a,
+              STORAGE : OwnedStorage<OWNED, SHARED>,
+              $($wo)*
+            $body
+    }
+}
+
 defimpl! {[] (Drop for) where { } {
     fn drop(&mut self) {
         match self.mode() {
+            Owned(ptr) => unsafe { self.storage.deallocate_a(ptr) },
+            Shared(ptr) => unsafe { self.storage.deallocate_b(ptr) },
+            Borrowed => (),
+        }
+    }
+} }
+
+defphantomimpl! {[] (Drop for) where { } {
+    fn drop(&mut self) {
+        match SupercowMode::from_ptr(self.mode) {
             Owned(ptr) => unsafe { self.storage.deallocate_a(ptr) },
             Shared(ptr) => unsafe { self.storage.deallocate_b(ptr) },
             Borrowed => (),
@@ -989,9 +1072,21 @@ defimpl! {@unsafe [] (Send for) where {
     STORAGE : Send,
 } { } }
 
+defphantomimpl! {@unsafe [] (Send for) where {
+    OWNED : Send,
+    SHARED : Send,
+    STORAGE : Send,
+} { } }
+
 defimpl! {@unsafe [] (Sync for) where {
     OWNED : Sync,
     &'a BORROWED : Sync,
+    SHARED : Sync,
+    STORAGE : Sync,
+} { } }
+
+defphantomimpl! {@unsafe [] (Sync for) where {
+    OWNED : Sync,
     SHARED : Sync,
     STORAGE : Sync,
 } { } }
@@ -1155,6 +1250,20 @@ defimpl! {[] () where { } {
         }
     }
 
+    /// Converts this `Supercow` into a `Phantomcow`.
+    pub fn phantom(mut this: Self)
+                   -> Phantomcow<'a, OWNED, BORROWED, SHARED, STORAGE> {
+        let ret = Phantomcow {
+            mode: this.mode,
+            storage: mem::replace(&mut this.storage, Default::default()),
+            _owned: PhantomData,
+            _borrowed: PhantomData,
+            _shared: PhantomData,
+        };
+        this.mode = ptr::null_mut();
+        ret
+    }
+
     unsafe fn borrow_owned(&mut self)
     where OWNED : SafeBorrow<BORROWED> {
         // There's no safe way to propagate `borrowed_ptr` into
@@ -1198,13 +1307,7 @@ defimpl! {[] () where { } {
     }
 
     fn mode(&self) -> SupercowMode {
-        if self.mode.is_null() {
-            Borrowed
-        } else if 0 == (self.mode as usize & 1) {
-            Owned(self.mode)
-        } else {
-            Shared((self.mode as usize & !1usize) as *mut ())
-        }
+        SupercowMode::from_ptr(self.mode)
     }
 
     /// Returns the bias to use for relative pointers to avoid creating null
@@ -1397,6 +1500,36 @@ defimpl! {[] (Clone for) where {
     }
 } }
 
+defphantomimpl! {[] (Clone for) where {
+    OWNED : Clone,
+    SHARED : Clone,
+} {
+    fn clone(&self) -> Self {
+        let mut clone: Self = Phantomcow {
+            mode: ptr::null_mut(),
+            storage: Default::default(),
+            _owned: PhantomData,
+            _borrowed: PhantomData,
+            _shared: PhantomData,
+        };
+
+        match SupercowMode::from_ptr(self.mode) {
+            Owned(ptr) => clone.mode = clone.storage.allocate_a(
+                unsafe { self.storage.get_ptr_a(ptr) }.clone()),
+
+            Borrowed => (),
+
+            Shared(ptr) => {
+                let m = clone.storage.allocate_b(
+                    unsafe { self.storage.get_ptr_b(ptr) }.clone());
+                clone.mode = (1usize | (m as usize)) as *mut ();
+            },
+        }
+
+        clone
+    }
+} }
+
 defimpl! {[] (From<OWNED> for) where {
     OWNED : SafeBorrow<BORROWED>,
 } {
@@ -1551,7 +1684,7 @@ mod misc_tests {
     }
 }
 
-macro_rules! tests { ($modname:ident, $stype:ident) => {
+macro_rules! tests { ($modname:ident, $stype:ident, $ptype:ident) => {
 #[cfg(test)]
 mod $modname {
     use std::sync::Arc;
@@ -1767,9 +1900,88 @@ mod $modname {
             assert_eq!(expected.as_path(), &*s);
         }
     }
+
+    struct MockNativeResource(*mut u32);
+    impl Drop for MockNativeResource {
+        fn drop(&mut self) {
+            unsafe { *self.0 = 0 };
+        }
+    }
+    // Not truly safe, but we're not crossing threads here and we need
+    // something for the Sync tests either way.
+    unsafe impl Send for MockNativeResource { }
+    unsafe impl Sync for MockNativeResource { }
+
+    struct MockDependentResource<'a> {
+        ptr: *mut u32,
+        _handle: $ptype<'a, MockNativeResource>,
+    }
+
+    fn check_dependent_ok(mdr: MockDependentResource) {
+        assert_eq!(42, unsafe { *mdr.ptr });
+    }
+
+    #[test]
+    fn borrowed_phantomcow() {
+        let mut fourty_two = 42u32;
+
+        let native = MockNativeResource(&mut fourty_two);
+        let sc: $stype<MockNativeResource> = Supercow::borrowed(&native);
+        check_dependent_ok(MockDependentResource {
+            ptr: &mut fourty_two,
+            _handle: Supercow::phantom(sc),
+        });
+    }
+
+    #[test]
+    fn owned_phantomcow() {
+        let mut fourty_two = 42u32;
+
+        let native = MockNativeResource(&mut fourty_two);
+        let sc: $stype<MockNativeResource> = Supercow::owned(native);
+        check_dependent_ok(MockDependentResource {
+            ptr: &mut fourty_two,
+            _handle: Supercow::phantom(sc),
+        });
+    }
+
+    #[test]
+    fn shared_phantomcow() {
+        let mut fourty_two = 42u32;
+
+        let native = MockNativeResource(&mut fourty_two);
+        let sc: $stype<MockNativeResource> =
+            Supercow::shared(Arc::new(native));
+        check_dependent_ok(MockDependentResource {
+            ptr: &mut fourty_two,
+            _handle: Supercow::phantom(sc),
+        });
+    }
+
+    #[test]
+    fn clone_owned_phantomcow() {
+        let sc: $stype<String> = Supercow::owned("hello world".to_owned());
+        let p1 = Supercow::phantom(sc);
+        let _p2 = p1.clone();
+    }
+
+    #[test]
+    fn clone_borrowed_phantomcow() {
+        let sc: $stype<String, str> = Supercow::borrowed("hello world");
+        let p1 = Supercow::phantom(sc);
+        let _p2 = p1.clone();
+    }
+
+    #[test]
+    fn clone_shared_phantomcow() {
+        let sc: $stype<String> = Supercow::shared(
+            Arc::new("hello world".to_owned()));
+        let p1 = Supercow::phantom(sc);
+        let _p2 = p1.clone();
+    }
 } } }
 
-tests!(inline_sync_tests, InlineSupercow);
-tests!(inline_nonsync_tests, InlineNonSyncSupercow);
-tests!(boxed_sync_tests, Supercow);
-tests!(boxed_nonsync_tests, NonSyncSupercow);
+tests!(inline_sync_tests, InlineSupercow, InlinePhantomcow);
+tests!(inline_nonsync_tests, InlineNonSyncSupercow, InlineNonSyncPhantomcow);
+tests!(boxed_sync_tests, Supercow, Phantomcow);
+tests!(boxed_nonsync_tests, NonSyncSupercow, NonSyncPhantomcow);
