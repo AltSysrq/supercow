@@ -1002,13 +1002,15 @@ where BORROWED : 'a,
     // - Null. The `Supercow` holds a `&'a BORROWED`.
     //
     // - Even alignment. The `Supercow` holds an `OWNED` accessible via
-    // `STORAGE`, and this value is what is passed into the `STORAGE` methods.
+    // `STORAGE` field a, and this value is what is passed into the `STORAGE`
+    // methods.
     //
-    // - Odd alignment. The `Supercow` holds a `SHARED`, behind a `Box` at the
-    // address one less than this value. Note that since the default `SHARED`
-    // is a `Box<DefaultFeatures>`, we actually end up with two levels of
-    // boxing here. This is actually necessary so that the whole thing only
-    // takes one immediate pointer.
+    // - Odd alignment. The `Supercow` holds a `SHARED`, accessible via
+    // `STORAGE` field b, with a pointer value one less than this one. Note
+    // that since the default `SHARED` is a `Box<DefaultFeatures>`, we actually
+    // end up with two levels of boxing here for `BoxedStorage`. This is
+    // actually necessary so that the whole thing only takes one immediate
+    // pointer.
     mode: *mut (),
     storage: STORAGE,
 
