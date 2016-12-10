@@ -826,7 +826,7 @@ macro_rules! supercow_features {
             /// Returns the address of `self`.
             ///
             /// This is used to disassemble trait objects of this trait without
-            /// resorting to transuting or the unstable `TraitObject` type.
+            /// resorting to transmuting or the unstable `TraitObject` type.
             fn self_address_mut(&mut self) -> *mut ();
         }
         impl<'a, T : 'a + $($req +)* $($clone +)* $crate::ext::ConstDeref + Sized>
