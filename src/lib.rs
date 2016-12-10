@@ -1628,7 +1628,6 @@ macro_rules! deleg_fmt { ($tr:ident) => {
 } }
 
 deleg_fmt!(Binary);
-deleg_fmt!(Debug);
 deleg_fmt!(Display);
 deleg_fmt!(LowerExp);
 deleg_fmt!(LowerHex);
@@ -1636,6 +1635,26 @@ deleg_fmt!(Octal);
 deleg_fmt!(Pointer);
 deleg_fmt!(UpperExp);
 deleg_fmt!(UpperHex);
+
+impl<'a, OWNED, BORROWED : ?Sized, SHARED, STORAGE>
+fmt::Debug for Supercow<'a, OWNED, BORROWED, SHARED, STORAGE, ()>
+where BORROWED : 'a,
+      *const BORROWED : PointerFirstRef,
+      STORAGE : OwnedStorage<OWNED, SHARED> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "<Phantomcow>")
+    }
+}
+
+impl<'a, OWNED, BORROWED : ?Sized, SHARED, STORAGE>
+fmt::Debug for Supercow<'a, OWNED, BORROWED, SHARED, STORAGE, *const BORROWED>
+where BORROWED : fmt::Debug + 'a,
+      *const BORROWED : PointerFirstRef,
+      STORAGE : OwnedStorage<OWNED, SHARED> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        (**self).fmt(f)
+    }
+}
 
 defimpl! {[T] (cmp::PartialEq<T> for) where {
     T : Borrow<BORROWED>,
