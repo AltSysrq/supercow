@@ -992,10 +992,6 @@ where BORROWED : 'a,
     // the first pointer-sized value is the actual address (see
     // `PointerFirstRef`).
     //
-    // We do need to take care that we still don't create a null reference
-    // here; there is code to check for Rust putting the internal storage first
-    // in the struct and adding 1 if this happens.
-    //
     // If `STORAGE` does not use internal pointers, we can skip all the
     // arithmetic and return this value unmodified.
     ptr: PTR,
