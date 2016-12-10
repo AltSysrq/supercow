@@ -141,7 +141,10 @@
 //! The only difference between the `NonSync` variant and the default is that
 //! the default is to require the shared pointer type (eg, `Arc`) to be `Send`
 //! and `Sync` (which thus prohibits using `Rc`), whereas `NonSync` does not
-//! and so allows `Rc`.
+//! and so allows `Rc`. Note that a side-effect of the default `Send + Sync`
+//! requirement is that the type of `BORROWED` also needs to be `Send` and
+//! `Sync` when using `Arc` as the shared reference type; if it is not `Send`
+//! and `Sync`, use `NonSyncSupercow` instead.
 //!
 //! By default, `Supercow` boxes any owned value or shared reference. This
 //! makes the `Deref` implementation faster since it does not need to account
@@ -838,7 +841,8 @@ supercow_features!(
     pub trait NonSyncFeatures: Clone);
 
 /// `Supercow` with the default `SHARED` changed to `NonSyncFeatures`, enabling
-/// the use of `Rc` as a shared reference type.
+/// the use of `Rc` as a shared reference type as well as making it possible to
+/// use non-`Send` or non-`Sync` `BORROWED` types easily.
 ///
 /// Note that the `SHARED` type must have `'static` lifetime, since this is
 /// generally more convenient and makes the `Supercow` as a whole covariant.
