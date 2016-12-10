@@ -1534,6 +1534,35 @@ defphantomimpl! {[] (Clone for) where {
     }
 } }
 
+defphantomimpl! {[] () where { } {
+    /// If this `Phantomcow` is owned, return `None`. Else, clone and return
+    /// `self`.
+    pub fn clone_non_owned(&self) -> Option<Self>
+    where SHARED : Clone {
+        let mut clone: Self = Phantomcow {
+            mode: ptr::null_mut(),
+            storage: Default::default(),
+            _owned: PhantomData,
+            _borrowed: PhantomData,
+            _shared: PhantomData,
+        };
+
+        match SupercowMode::from_ptr(self.mode) {
+            Owned(_) => return None,
+
+            Borrowed => (),
+
+            Shared(ptr) => {
+                let m = clone.storage.allocate_b(
+                    unsafe { self.storage.get_ptr_b(ptr) }.clone());
+                clone.mode = (1usize | (m as usize)) as *mut ();
+            },
+        }
+
+        Some(clone)
+    }
+} }
+
 defimpl! {[] (From<OWNED> for) where {
     OWNED : SafeBorrow<BORROWED>,
 } {
@@ -1966,6 +1995,7 @@ mod $modname {
     fn clone_owned_phantomcow() {
         let sc: $stype<String> = Supercow::owned("hello world".to_owned());
         let p1 = Supercow::phantom(sc);
+        assert!(p1.clone_non_owned().is_none());
         let _p2 = p1.clone();
     }
 
@@ -1973,6 +2003,7 @@ mod $modname {
     fn clone_borrowed_phantomcow() {
         let sc: $stype<String, str> = Supercow::borrowed("hello world");
         let p1 = Supercow::phantom(sc);
+        assert!(p1.clone_non_owned().is_some());
         let _p2 = p1.clone();
     }
 
@@ -1981,6 +2012,7 @@ mod $modname {
         let sc: $stype<String> = Supercow::shared(
             Arc::new("hello world".to_owned()));
         let p1 = Supercow::phantom(sc);
+        assert!(p1.clone_non_owned().is_some());
         let _p2 = p1.clone();
     }
 } } }
