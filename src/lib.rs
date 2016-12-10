@@ -419,46 +419,6 @@
 //!
 //! ```
 //!
-//! # Shared Reference Type
-//!
-//! The third type parameter type to `Supercow` specifies the shared reference
-//! type.
-//!
-//! The default is `Box<DefaultFeatures<'static>>`, which is a boxed trait
-//! object describing the features a shared reference type must have while
-//! allowing any such reference to be used without needing a generic type
-//! argument.
-//!
-//! An alternate feature set can be found in `NonSyncFeatures`, which is also
-//! usable through the `NonSyncSupercow` typedef (which also makes it
-//! `'static`). You can create custom feature traits in this style with
-//! `supercow_features!`.
-//!
-//! It is perfectly legal to use a non-`'static` shared reference type. In
-//! fact, the original design for `Supercow<'a>` used `DefaultFeatures<'a>`.
-//! However, a non-`'static` lifetime makes the system harder to use, and if
-//! entangled with `'a` on `Supercow`, makes the structure lifetime-invariant,
-//! which makes it much harder to treat as a reference.
-//!
-//! Boxing the shared reference and putting it behind a trait object both add
-//! overhead, of course. If you wish, you can use a real reference type in the
-//! third parameter as long as you are OK with losing the flexibility the
-//! boxing would provide. For example,
-//!
-//! ```
-//! use std::rc::Rc;
-//!
-//! use supercow::Supercow;
-//!
-//! # fn main() {
-//! let x: Supercow<u32, u32, Rc<u32>> = Supercow::shared(Rc::new(42u32));
-//! println!("{}", *x);
-//! # }
-//! ```
-//!
-//! Note that you may need to provide an identity `supercow::aux::SharedFrom`
-//! implementation if you have a custom reference type.
-//!
 //! # Conversions
 //!
 //! To facilitate client API designs, `Supercow` converts (via `From`/`Into`)
@@ -475,30 +435,9 @@
 //!
 //! - `Rc<OWNED>` and `Arc<OWNED>` for `Supercow`s where `OWNED` and `BORROWED`
 //! are the exact same type, and where the `Rc` or `Arc` can be converted into
-//! `SHARED` via `supercow::aux::SharedFrom`. If `OWNED` and `BORROWED` are
+//! `SHARED` via `supercow::ext::SharedFrom`. If `OWNED` and `BORROWED` are
 //! different types, `Supercow::shared()` will be needed to construct the
 //! `Supercow` explicitly.
-//!
-//! # Storage Type
-//!
-//! When in owned or shared mode, a `Supercow` needs someplace to store the
-//! `OWNED` or `SHARED` value itself. This can be customised with the fourth
-//! type parameter and the `OwnedStorage` trait. Two strategies are provided by
-//! this crate:
-//!
-//! - `BoxedStorage` puts everything behind `Box`es. This has the advantage
-//! that the `Supercow` structure is only one pointer wider than a basic
-//! reference, and results in a faster `Deref`. The obvious drawback is that
-//! you pay for allocations on construction. This is the default with
-//! `Supercow` and `NonSyncSupercow`.
-//!
-//! - `InlineStorage` uses an `enum` to store the values inline in the
-//! `Supercow`, thus incurring no allocation, but making the `Supercow` itself
-//! bigger. This is easily available via the `InlineSupercow` and
-//! `InlineNonSyncSupercow` types.
-//!
-//! If you find some need, you can define custom storage types, though note
-//! that the trait is quite unsafe and somewhat subtle.
 //!
 //! # Advanced
 //!
@@ -543,6 +482,67 @@
 //!   assert_sync_and_send(s);
 //! }
 //! ```
+//!
+//! ## Shared Reference Type
+//!
+//! The third type parameter type to `Supercow` specifies the shared reference
+//! type.
+//!
+//! The default is `Box<DefaultFeatures<'static>>`, which is a boxed trait
+//! object describing the features a shared reference type must have while
+//! allowing any such reference to be used without needing a generic type
+//! argument.
+//!
+//! An alternate feature set can be found in `NonSyncFeatures`, which is also
+//! usable through the `NonSyncSupercow` typedef (which also makes it
+//! `'static`). You can create custom feature traits in this style with
+//! `supercow_features!`.
+//!
+//! It is perfectly legal to use a non-`'static` shared reference type. In
+//! fact, the original design for `Supercow<'a>` used `DefaultFeatures<'a>`.
+//! However, a non-`'static` lifetime makes the system harder to use, and if
+//! entangled with `'a` on `Supercow`, makes the structure lifetime-invariant,
+//! which makes it much harder to treat as a reference.
+//!
+//! Boxing the shared reference and putting it behind a trait object both add
+//! overhead, of course. If you wish, you can use a real reference type in the
+//! third parameter as long as you are OK with losing the flexibility the
+//! boxing would provide. For example,
+//!
+//! ```
+//! use std::rc::Rc;
+//!
+//! use supercow::Supercow;
+//!
+//! # fn main() {
+//! let x: Supercow<u32, u32, Rc<u32>> = Supercow::shared(Rc::new(42u32));
+//! println!("{}", *x);
+//! # }
+//! ```
+//!
+//! Note that you may need to provide an identity `supercow::ext::SharedFrom`
+//! implementation if you have a custom reference type.
+//!
+//! ## Storage Type
+//!
+//! When in owned or shared mode, a `Supercow` needs someplace to store the
+//! `OWNED` or `SHARED` value itself. This can be customised with the fourth
+//! type parameter (`STORAGE`), and the `OwnedStorage` trait. Two strategies
+//! are provided by this crate:
+//!
+//! - `BoxedStorage` puts everything behind `Box`es. This has the advantage
+//! that the `Supercow` structure is only one pointer wider than a basic
+//! reference, and results in a faster `Deref`. The obvious drawback is that
+//! you pay for allocations on construction. This is the default with
+//! `Supercow` and `NonSyncSupercow`.
+//!
+//! - `InlineStorage` uses an `enum` to store the values inline in the
+//! `Supercow`, thus incurring no allocation, but making the `Supercow` itself
+//! bigger. This is easily available via the `InlineSupercow` and
+//! `InlineNonSyncSupercow` types.
+//!
+//! If you find some need, you can define custom storage types, though note
+//! that the trait is quite unsafe and somewhat subtle.
 //!
 //! ## `PTR` type
 //!
