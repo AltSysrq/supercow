@@ -4,9 +4,9 @@ version = "0.1.0"
 authors = ["Jason Lingle"]
 license = "MIT/Apache-2.0"
 readme = "README.md"
-repository = "https://github.com/altsysrq/reflike"
-homepage = "https://github.com/altsysrq/reflike"
-# TODO Doc link
+repository = "https://github.com/altsysrq/supercow"
+homepage = "https://github.com/altsysrq/supercow"
+documentation = "https://altsysrq.github.io/rustdoc/supercow/index.html"
 keywords = ["ref", "borrow", "generic", "cow"]
 
 description = """
