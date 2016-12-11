@@ -990,33 +990,33 @@ where BORROWED : 'a,
     // This stores the precalculated `Deref` target, and is the only thing the
     // `Deref` implementation needs to inspect.
     //
-    // Note that there are three cases with references:
+    // Note that there are three cases with this pointer:
     //
-    // - A reference to an external value. In this case, we know that the
-    // reference will not be invalidated by movement or for the lifetime of
-    // `'a` and simply store the reference here as an absolute address.
+    // - A pointer to an external value. In this case, we know that the pointer
+    // will not be invalidated by movement or for the lifetime of `'a` and
+    // simply store the reference here as an absolute address.
     //
-    // - A reference to a ZST at an "external" location, often address 1. We
+    // - A pointer to a ZST at an "external" location, often address 1. We
     // don't need to handle this in any particular manner as long as we don't
-    // accidentally make a null reference, since the only thing safe rust can
-    // do with a ZST reference is inspect its address, and if we do "move" it
-    // around, there's nothing unsafe from this fact being leaked.
+    // accidentally make a null reference during deref(), since the only thing
+    // safe rust can do with a ZST reference is inspect its address, and if we
+    // do "move" it around, there's nothing unsafe from this fact being leaked.
     //
-    // - A reference into this `Supercow`. In this case, the absolute address
+    // - A pointer into this `Supercow`. In this case, the absolute address
     // will change whenever this `Supercow` is relocated. To handle this, we
     // instead store the offset from `&self` here, and adjust it at `Deref`
     // time. We differentiate between the two cases by inspecting the absolute
     // value of the address: If it is less than
     // `MAX_INTERNAL_BORROW_DISPLACEMENT*2`, we assume it is an internal
-    // reference, since no modern system ever has virtual memory mapped between
-    // 0 and 4kB (and any code elsewhere involving this region is presumably
-    // too low-level to be using `Supercow`).
+    // pointer, since no modern system ever has virtual memory mapped between 0
+    // and 4kB (and any code elsewhere involving this region is presumably too
+    // low-level to be using `Supercow`).
     //
     // One peculiarity is that this is declared as a typed pointer even though
-    // it does not necessarily reference anything. This is so that it works
-    // with DSTs, which have references larger than bare pointers. We assume
-    // the first pointer-sized value is the actual address (see
-    // `PointerFirstRef`).
+    // it does not necessarily point to anything (due to internal pointers).
+    // This is so that it works with DSTs, which have pointers larger than
+    // simple machine pointers. We assume the first pointer-sized value is the
+    // actual address (see `PointerFirstRef`).
     //
     // If `STORAGE` does not use internal pointers, we can skip all the
     // arithmetic and return this value unmodified.

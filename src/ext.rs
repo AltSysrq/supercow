@@ -30,7 +30,7 @@ use std::sync::Arc;
 /// ## Unsafety
 ///
 /// Behaviour is undefined if the implementation does not always return the
-/// same reference from `deref()` for any particular implementing value
+/// same reference from `const_deref()` for any particular implementing value
 /// (including if that value is moved or cloned).
 pub unsafe trait ConstDeref {
     /// The type this value dereferences to.
@@ -170,11 +170,11 @@ where T : Borrow<Path> {
     }
 }
 
-/// Marker trait identifying a reference type which begins with an absolute
+/// Marker trait identifying a pointer type which begins with an absolute
 /// address and contains no other address-dependent information.
 ///
-/// `Supercow` expects to be able to read the first pointer-sized value of such
-/// a reference and perform address arithmetic upon it.
+/// `Supercow` expects to be able to read the first machine-pointer-sized value
+/// of such a pointer and perform address arithmetic upon it.
 ///
 /// There is no utility of applying this trait to anything other than a const
 /// pointer.
@@ -488,11 +488,11 @@ pub unsafe trait PtrWrite<T : ?Sized> : Copy {
     /// Returns an instance of `Self` with no particular value.
     fn new() -> Self;
 
-    /// Writes the given reference into `self`.
+    /// Writes the given pointer into `self`.
     ///
     /// ## Unsafety
     ///
-    /// The implementation must not inspect the given reference. This call must
+    /// The implementation must not inspect the given pointer. This call must
     /// not panic.
     fn store_ptr(&mut self, t: *const T);
 }
