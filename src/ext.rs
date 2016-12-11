@@ -386,6 +386,13 @@ unsafe impl<A, B> OwnedStorage<A, B> for InlineStorage<A, B> {
     fn is_internal_storage() -> bool { true }
 }
 
+/// Used to give arbitrary values at least pointer alignment without making
+/// them otherwise bigger.
+///
+/// This likely isn't strictly necessary, since any allocator has an inherent
+/// alignment anyway, but it doesn't hurt to be explicit.
+type Aligned<T> = ([*const();0], T);
+
 /// Causes the `OWNED` or `SHARED` value of a `Supercow` to be stored in a
 /// `Box`.
 ///
@@ -398,9 +405,9 @@ unsafe impl<A, B> OwnedStorage<A, B> for BoxedStorage {
     #[inline]
     fn allocate_a(&mut self, value: A) -> *mut () {
         if mem::size_of::<A>() > 0 {
-            let boxed = Box::new(value);
+            let boxed: Box<Aligned<A>> = Box::new(([], value));
             let address = Box::into_raw(boxed);
-            address as *mut ()
+            unsafe { &mut (*address).1 as *mut A as *mut () }
         } else {
             // Handle ZSTs specially, since `Box` "allocates" them at address
             // 1.
@@ -411,9 +418,9 @@ unsafe impl<A, B> OwnedStorage<A, B> for BoxedStorage {
     #[inline]
     fn allocate_b(&mut self, value: B) -> *mut () {
         if mem::size_of::<B>() > 0 {
-            let boxed = Box::new(value);
+            let boxed: Box<Aligned<B>> = Box::new(([], value));
             let address = Box::into_raw(boxed);
-            address as *mut ()
+            unsafe { &mut (*address).1 as *mut B as *mut () }
         } else {
             // Handle ZSTs specially, since `Box` "allocates" them at address
             // 1.
@@ -423,28 +430,28 @@ unsafe impl<A, B> OwnedStorage<A, B> for BoxedStorage {
 
     #[inline]
     unsafe fn get_ptr_a<'a>(&'a self, ptr: *mut ()) -> &'a A {
-        &*(ptr as *const A)
+        &(*(ptr as *const Aligned<A>)).1
     }
 
     #[inline]
     unsafe fn get_ptr_b<'a>(&'a self, ptr: *mut ()) -> &'a B {
-        &*(ptr as *const B)
+        &(*(ptr as *const Aligned<B>)).1
     }
 
     #[inline]
     unsafe fn get_mut_a<'a>(&'a mut self, ptr: *mut ()) -> &'a mut A {
-        &mut*(ptr as *mut A)
+        &mut(*(ptr as *mut Aligned<A>)).1
     }
 
     #[inline]
     unsafe fn get_mut_b<'a>(&'a mut self, ptr: *mut ()) -> &'a mut B {
-        &mut*(ptr as *mut B)
+        &mut(*(ptr as *mut Aligned<B>)).1
     }
 
     #[inline]
     unsafe fn deallocate_a(&mut self, ptr: *mut ()) {
         if mem::size_of::<A>() > 0 {
-            drop(Box::from_raw(ptr as *mut A))
+            drop(Box::from_raw(ptr as *mut Aligned<A>))
         }
     }
 
@@ -458,7 +465,8 @@ unsafe impl<A, B> OwnedStorage<A, B> for BoxedStorage {
     #[inline]
     unsafe fn deallocate_into_a(&mut self, ptr: *mut ()) -> A {
         if mem::size_of::<A>() > 0 {
-            *Box::from_raw(ptr as *mut A)
+            let t = *Box::from_raw(ptr as *mut Aligned<A>);
+            t.1
         } else {
             ptr::read(ptr as *mut A)
         }
@@ -467,7 +475,8 @@ unsafe impl<A, B> OwnedStorage<A, B> for BoxedStorage {
     #[inline]
     unsafe fn deallocate_into_b(&mut self, ptr: *mut ()) -> B {
         if mem::size_of::<B>() > 0 {
-            *Box::from_raw(ptr as *mut B)
+            let t = *Box::from_raw(ptr as *mut Aligned<B>);
+            t.1
         } else {
             ptr::read(ptr as *mut B)
         }
