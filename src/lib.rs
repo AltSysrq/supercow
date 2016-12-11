@@ -1457,7 +1457,7 @@ defimpl! {[] () where { } {
         match this.mode() {
             Owned(_) | Shared(_) => Supercow {
                 ptr: this.ptr,
-                mode: this.mode,
+                mode: mem::replace(&mut this.mode, ptr::null_mut()),
                 storage: mem::replace(&mut this.storage, Default::default()),
                 _owned: PhantomData,
                 _borrowed: PhantomData,
@@ -1501,7 +1501,7 @@ defimpl! {[] () where { } {
             // and possibly `STORAGE`.
             Owned(_) => Supercow {
                 ptr: this.ptr,
-                mode: this.mode,
+                mode: mem::replace(&mut this.mode, ptr::null_mut()),
                 storage: mem::replace(&mut this.storage, Default::default()),
                 _owned: PhantomData,
                 _borrowed: PhantomData,
@@ -1516,14 +1516,13 @@ defimpl! {[] () where { } {
     pub fn phantom(mut this: Self)
                    -> Phantomcow<'a, OWNED, BORROWED, SHARED, STORAGE> {
         let ret = Supercow {
-            mode: this.mode,
             ptr: (),
+            mode: mem::replace(&mut this.mode, ptr::null_mut()),
             storage: mem::replace(&mut this.storage, Default::default()),
             _owned: PhantomData,
             _borrowed: PhantomData,
             _shared: PhantomData,
         };
-        this.mode = ptr::null_mut();
         ret
     }
 
@@ -2184,6 +2183,54 @@ mod $modname {
             s.to_mut().push(format!("{}", i));
             assert_eq!(expected.as_path(), &*s);
         }
+    }
+
+    #[test]
+    fn unborrow_owned() {
+        let orig: Supercow<String, str> =
+            Supercow::owned("hello world".to_owned());
+        let unborrowed = Supercow::unborrow(orig);
+        assert_eq!(unborrowed, "hello world");
+    }
+
+    #[test]
+    fn unborrow_borrowed() {
+        let orig: Supercow<String, str> =
+            Supercow::borrowed("hello world");
+        let unborrowed = Supercow::unborrow(orig);
+        assert_eq!(unborrowed, "hello world");
+    }
+
+    #[test]
+    fn unborrow_shared() {
+        let orig: Supercow<String> =
+            Supercow::shared(Arc::new("hello world".to_owned()));
+        let unborrowed = Supercow::unborrow(orig);
+        assert_eq!(unborrowed, "hello world".to_owned());
+    }
+
+    #[test]
+    fn take_ownership_owned() {
+        let orig: Supercow<String, str> =
+            Supercow::owned("hello world".to_owned());
+        let owned: Supercow<String, str> = Supercow::take_ownership(orig);
+        assert_eq!(owned, "hello world");
+    }
+
+    #[test]
+    fn take_ownership_borrowed() {
+        let orig: Supercow<String, str> =
+            Supercow::borrowed("hello world");
+        let owned: Supercow<String, str> = Supercow::take_ownership(orig);
+        assert_eq!(owned, "hello world");
+    }
+
+    #[test]
+    fn take_ownership_shared() {
+        let orig: Supercow<String> =
+            Supercow::shared(Arc::new("hello world".to_owned()));
+        let owned: Supercow<String> = Supercow::take_ownership(orig);
+        assert_eq!(owned, "hello world".to_owned());
     }
 
     struct MockNativeResource(*mut u32);
