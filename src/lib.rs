@@ -1401,12 +1401,51 @@ defimpl! {[] () where { } {
         }
     }
 
+    /// If `this` is borrowed, clone the inner value so that the new `Supercow`
+    /// has a `'static` lifetime.
+    ///
+    /// If the inner value is owned or borrowed, this simply returns the input
+    /// unchanged.
+    ///
+    /// ## Example
+    ///
+    /// ```
+    /// use supercow::Supercow;
+    ///
+    /// let s = {
+    ///   let forty_two = 42u32;
+    ///   let by_ref: Supercow<u32> = Supercow::borrowed(&forty_two);
+    ///   // We can't return `by_ref` because it holds a reference to
+    ///   // `forty_two`. However, we can change that lifetime parameter
+    ///   // to `'static` and then move that out of the block.
+    ///   let by_val: Supercow<'static, u32> = Supercow::unborrow(by_ref);
+    ///   by_val
+    /// };
+    /// assert_eq!(42, *s);
+    /// ```
+    pub fn unborrow(mut this: Self)
+                    -> Supercow<'static, OWNED, BORROWED, SHARED, STORAGE, PTR>
+    where OWNED : SafeBorrow<BORROWED>,
+          BORROWED : ToOwned<Owned = OWNED>,
+          PTR : PtrRead<BORROWED> {
+        match this.mode() {
+            Owned(_) | Shared(_) => Supercow {
+                ptr: this.ptr,
+                mode: this.mode,
+                storage: mem::replace(&mut this.storage, Default::default()),
+                _owned: PhantomData,
+                _borrowed: PhantomData,
+                _shared: PhantomData,
+            },
+
+            Borrowed => Supercow::owned((*this).to_owned()),
+        }
+    }
+
     /// Takes ownership of the underlying value, so that this `Supercow` has a
     /// `'static` lifetime.
     ///
-    /// This may also change the `SHARED` type parameter arbitrarily (which
-    /// happens, e.g., when converting from `Supercow<'a,u32>` to
-    /// `Supercow<'static,u32>`).
+    /// This may also change the `SHARED` type parameter arbitrarily.
     ///
     /// ## Example
     ///
