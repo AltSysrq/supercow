@@ -12,7 +12,7 @@
 //!
 //! `Supercow` provides a mechanism for making APIs that accept very general
 //! references while maintaining very low overhead for usages not involving
-//! heavy-weight references (eg, `Arc`). Though nominally similar to `Cow` in
+//! heavy-weight references (e.g, `Arc`). Though nominally similar to `Cow` in
 //! structure (and being named after it), `Supercow` does not require the
 //! containee to be `Clone` or `ToOwned` unless operations inherently depending
 //! on either are invoked.
@@ -33,34 +33,34 @@
 //!
 //! # fn main() {
 //! // Declare some data we want to reference.
-//! let fourty_two = 42u32;
+//! let forty_two = 42u32;
 //! // Make a Supercow referencing the above.
 //! // N.B. Type inference doesn't work reliably if there is nothing explicitly
 //! // typed to which the Supercow is passed, so we declare the type of this
 //! // variable explicitly.
-//! let mut a: Supercow<u32> = Supercow::borrowed(&fourty_two);
+//! let mut a: Supercow<u32> = Supercow::borrowed(&forty_two);
 //! // We can deref `a` to a `u32`, and also see that it does
-//! // indeed reference `fourty_two`.
+//! // indeed reference `forty_two`.
 //! assert_eq!(42, *a);
-//! assert_eq!(&fourty_two as *const u32, &*a as *const u32);
+//! assert_eq!(&forty_two as *const u32, &*a as *const u32);
 //!
-//! // Clone `a` so that it also points to `fourty_two`.
+//! // Clone `a` so that it also points to `forty_two`.
 //! let mut b = a.clone();
 //! assert_eq!(42, *b);
-//! assert_eq!(&fourty_two as *const u32, &*b as *const u32);
+//! assert_eq!(&forty_two as *const u32, &*b as *const u32);
 //!
 //! // `to_mut()` can be used to mutate `a` and `b` independently, taking
 //! // ownership as needed.
 //! *a.to_mut() += 2;
-//! assert_eq!(42, fourty_two);
+//! assert_eq!(42, forty_two);
 //! assert_eq!(44, *a);
 //! assert_eq!(42, *b);
-//! assert_eq!(&fourty_two as *const u32, &*b as *const u32);
+//! assert_eq!(&forty_two as *const u32, &*b as *const u32);
 //!
 //! *b.to_mut() = 56;
 //! assert_eq!(44, *a);
 //! assert_eq!(56, *b);
-//! assert_eq!(42, fourty_two);
+//! assert_eq!(42, forty_two);
 //!
 //! // We can also use `Arc` transparently.
 //! let mut c: Supercow<u32> = Supercow::shared(Arc::new(99));
@@ -120,7 +120,7 @@
 //! }
 //! ```
 //!
-//! ## Chosing the right variant
+//! ## Choosing the right variant
 //!
 //! `Supercow` is extremely flexible as to how it internally stores and manages
 //! data. There are four variants provided by default: `Supercow`,
@@ -139,12 +139,12 @@
 //! construct extremely quickly.
 //!
 //! The only difference between the `NonSync` variant and the default is that
-//! the default is to require the shared pointer type (eg, `Arc`) to be `Send`
-//! and `Sync` (which thus prohibits using `Rc`), whereas `NonSync` does not
-//! and so allows `Rc`. Note that a side-effect of the default `Send + Sync`
-//! requirement is that the type of `BORROWED` also needs to be `Send` and
-//! `Sync` when using `Arc` as the shared reference type; if it is not `Send`
-//! and `Sync`, use `NonSyncSupercow` instead.
+//! the default is to require the shared pointer type (e.g., `Arc`) to be
+//! `Send` and `Sync` (which thus prohibits using `Rc`), whereas `NonSync` does
+//! not and so allows `Rc`. Note that a side-effect of the default `Send +
+//! Sync` requirement is that the type of `BORROWED` also needs to be `Send`
+//! and `Sync` when using `Arc` as the shared reference type; if it is not
+//! `Send` and `Sync`, use `NonSyncSupercow` instead.
 //!
 //! By default, `Supercow` boxes any owned value or shared reference. This
 //! makes the `Deref` implementation faster since it does not need to account
@@ -225,7 +225,7 @@
 //!     Database
 //!   }
 //!   fn close(self) -> bool {
-//!     // Eg, it returns an error on failure or something
+//!     // E.g., it returns an error on failure or something
 //!     true
 //!   }
 //! }
@@ -259,7 +259,7 @@
 //! #     Database
 //! #   }
 //! #   fn close(self) -> bool {
-//! #     // Eg, it returns an error on failure or something
+//! #     // E.g., it returns an error on failure or something
 //! #     true
 //! #   }
 //! # }
@@ -342,7 +342,7 @@
 //!     Database
 //!   }
 //!   fn close(self) -> bool {
-//!     // Eg, it returns an error on failure or something
+//!     // E.g., it returns an error on failure or something
 //!     true
 //!   }
 //! }
@@ -430,7 +430,7 @@
 //! restriction.
 //!
 //! - A reference to the `OWNED` type. References to a different `BORROWED`
-//! type are currently not convertable; `Supercow::borrowed()` will be needed
+//! type are currently not convertible; `Supercow::borrowed()` will be needed
 //! to construct the `Supercow` explicitly.
 //!
 //! - `Rc<OWNED>` and `Arc<OWNED>` for `Supercow`s where `OWNED` and `BORROWED`
@@ -562,7 +562,7 @@
 //! only requiring a bit of internal memory initialisation besides setting the
 //! reference itself.
 //!
-//! The defual `Supercow` type boxes the owned type and double-boxes the shared
+//! The default `Supercow` type boxes the owned type and double-boxes the shared
 //! type. This obviously dominates construction cost in those cases.
 //!
 //! `InlineSupercow` eliminates one box layer. This means that constructing an
@@ -587,7 +587,7 @@
 //! In all cases, the `Deref` implementation is not dependent on the ownership
 //! mode of the `Supercow`, and so is not affected by the shared reference
 //! type, most importantly, making no virtual function calls even under the
-//! default boxed shared reference type. However, the way it works colud
+//! default boxed shared reference type. However, the way it works could
 //! prevent LLVM optimisations from applying in particular circumstances.
 //!
 //! For those wanting specifics, the function
@@ -767,7 +767,7 @@ use self::ext::*;
 
 // Historical note: Originally, the shared type was required to implement
 // `ConstDeref`, and so the shared type was `Box<$feature<Target = BORROWED>>`.
-// This mostly worked, but it confused lifetime inferrence in a number of
+// This mostly worked, but it confused lifetime inference in a number of
 // cases, particularly surrounding variance. Because of that, we instead have
 // stricter requirements on a number of traits (including making `SharedFrom`
 // unsafe) so that we can pull the pointer out of the non-boxed shared
@@ -924,7 +924,7 @@ pub type NonSyncSupercow<'a, OWNED, BORROWED = OWNED> =
 /// `Supercow` with the default `STORAGE` changed to `InlineStorage`.
 ///
 /// This reduces the number of allocations needed to construct an owned or
-/// shared `Superow` (down to zero for owned, but note that the default
+/// shared `Supercow` (down to zero for owned, but note that the default
 /// `SHARED` still has its own `Box`) at the cost of bloating the `Supercow`
 /// itself, as it now needs to be able to fit a whole `OWNED` instance.
 pub type InlineSupercow<'a, OWNED, BORROWED = OWNED,
@@ -986,7 +986,7 @@ where BORROWED : 'a,
     // 0 and 4kB (and any code elsewhere involving this region is presumably
     // too low-level to be using `Supercow`).
     //
-    // One pecularity is that this is declared as a typed pointer even though
+    // One peculiarity is that this is declared as a typed pointer even though
     // it does not necessarily reference anything. This is so that it works
     // with DSTs, which have references larger than bare pointers. We assume
     // the first pointer-sized value is the actual address (see
@@ -1140,7 +1140,7 @@ defimpl! {[] () where { } {
 
     /// Creates a new `Supercow` using the given shared reference.
     ///
-    /// The reference must be convertable to `SHARED` via `SharedFrom`.
+    /// The reference must be convertible to `SHARED` via `SharedFrom`.
     pub fn shared<T>(inner: T) -> Self
     where T : ConstDeref<Target = BORROWED>,
           SHARED : SharedFrom<T> {
@@ -1268,7 +1268,7 @@ defimpl! {[] () where { } {
                         this.storage.get_ptr_a(ptr)
                     }.borrow() as *const BORROWED;
 
-                    // These steps need to be uninterupted by safe function
+                    // These steps need to be uninterrupted by safe function
                     // calls, as any panics would result in dangling pointers.
                     // Specifically:
                     //
@@ -1335,15 +1335,15 @@ defimpl! {[] () where { } {
     ///
     /// use supercow::Supercow;
     ///
-    /// let fourty_two: u32 = 42;
+    /// let forty_two: u32 = 42;
     ///
-    /// let borrowed: Supercow<u32> = (&fourty_two).into();
-    /// assert_eq!(Some(&fourty_two), Supercow::extract_ref(&borrowed));
+    /// let borrowed: Supercow<u32> = (&forty_two).into();
+    /// assert_eq!(Some(&forty_two), Supercow::extract_ref(&borrowed));
     ///
-    /// let owned: Supercow<u32> = fourty_two.into();
+    /// let owned: Supercow<u32> = forty_two.into();
     /// assert_eq!(None, Supercow::extract_ref(&owned));
     ///
-    /// let shared: Supercow<u32> = Arc::new(fourty_two).into();
+    /// let shared: Supercow<u32> = Arc::new(forty_two).into();
     /// assert_eq!(None, Supercow::extract_ref(&shared));
     /// ```
     pub fn extract_ref(this: &Self) -> Option<&'a BORROWED>
@@ -1405,7 +1405,7 @@ defimpl! {[] () where { } {
     /// `'static` lifetime.
     ///
     /// This may also change the `SHARED` type parameter arbitrarily (which
-    /// happens, eg, when converting from `Supercow<'a,u32>` to
+    /// happens, e.g., when converting from `Supercow<'a,u32>` to
     /// `Supercow<'static,u32>`).
     ///
     /// ## Example
@@ -1414,10 +1414,10 @@ defimpl! {[] () where { } {
     /// use supercow::Supercow;
     ///
     /// let s = {
-    ///   let fourty_two = 42u32;
-    ///   let by_ref: Supercow<u32> = Supercow::borrowed(&fourty_two);
+    ///   let forty_two = 42u32;
+    ///   let by_ref: Supercow<u32> = Supercow::borrowed(&forty_two);
     ///   // We can't return `by_ref` because it holds a reference to
-    ///   // `fourty_two`. However, we can change that lifetime parameter
+    ///   // `forty_two`. However, we can change that lifetime parameter
     ///   // to `'static` and then move that out of the block.
     ///   let by_val: Supercow<'static, u32> =
     ///     Supercow::take_ownership(by_ref);
@@ -1467,7 +1467,7 @@ defimpl! {[] () where { } {
         let mut borrowed_ptr = self.storage.get_ptr_a(self.mode).borrow()
             as *const BORROWED;
 
-        // We have a srong assumption that nothing ever gets allocated below
+        // We have a strong assumption that nothing ever gets allocated below
         // MAX_INTERNAL_BORROW_DISPLACEMENT, so check that in debug mode. Note
         // that ZSTs are frequently positioned in this range; as described in
         // the `Deref` implementation, we consider it OK to relocate them and
@@ -2143,37 +2143,37 @@ mod $modname {
 
     #[test]
     fn borrowed_phantomcow() {
-        let mut fourty_two = 42u32;
+        let mut forty_two = 42u32;
 
-        let native = MockNativeResource(&mut fourty_two);
+        let native = MockNativeResource(&mut forty_two);
         let sc: $stype<MockNativeResource> = Supercow::borrowed(&native);
         check_dependent_ok(MockDependentResource {
-            ptr: &mut fourty_two,
+            ptr: &mut forty_two,
             _handle: Supercow::phantom(sc),
         });
     }
 
     #[test]
     fn owned_phantomcow() {
-        let mut fourty_two = 42u32;
+        let mut forty_two = 42u32;
 
-        let native = MockNativeResource(&mut fourty_two);
+        let native = MockNativeResource(&mut forty_two);
         let sc: $stype<MockNativeResource> = Supercow::owned(native);
         check_dependent_ok(MockDependentResource {
-            ptr: &mut fourty_two,
+            ptr: &mut forty_two,
             _handle: Supercow::phantom(sc),
         });
     }
 
     #[test]
     fn shared_phantomcow() {
-        let mut fourty_two = 42u32;
+        let mut forty_two = 42u32;
 
-        let native = MockNativeResource(&mut fourty_two);
+        let native = MockNativeResource(&mut forty_two);
         let sc: $stype<MockNativeResource> =
             Supercow::shared(Arc::new(native));
         check_dependent_ok(MockDependentResource {
-            ptr: &mut fourty_two,
+            ptr: &mut forty_two,
             _handle: Supercow::phantom(sc),
         });
     }

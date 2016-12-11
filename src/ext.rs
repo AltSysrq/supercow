@@ -6,7 +6,7 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-//! Miscelaneous things used to integrate other code with Supercow, but which
+//! Miscellaneous things used to integrate other code with Supercow, but which
 //! are not of interest to most client developers.
 
 use std::borrow::Borrow;
@@ -22,7 +22,7 @@ use std::sync::Arc;
 /// Marker trait indicating a `Deref`-like which always returns the same
 /// reference.
 ///
-/// This is not indended for general use outside Supercow. Notably, mundane
+/// This is not intended for general use outside Supercow. Notably, mundane
 /// references satisfy this trait's requirements, but deliberately do not
 /// implement it. It is also not a subtrait of `Deref` due to some additional
 /// special logic around boxes.
@@ -65,8 +65,8 @@ unsafe impl<T : ConstDeref + ?Sized> ConstDeref for Box<T> {
 /// transfer ownership of the value and so must set everything up first in case
 /// setup panics.
 ///
-/// Essentially, such shared references actaully hold an `Option<Target>` which
-/// defaults to `None`, and panic if dereffed before the value is set.
+/// Essentially, such shared references actually hold an `Option<Target>` which
+/// defaults to `None`, and panic if dereferenced before the value is set.
 pub trait TwoStepShared<OWNED, BORROWED : ?Sized> {
     /// Returns a new, empty instance of `Self`.
     fn new_two_step() -> Self;
