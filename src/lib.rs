@@ -1064,10 +1064,10 @@ impl SupercowMode {
     fn from_ptr(mode: *mut ()) -> Self {
         if mode.is_null() {
             Borrowed
-        } else if 0 == (mode as usize & 1) {
+        } else if mode.is_2_aligned() {
             Owned(mode)
         } else {
-            Shared((mode as usize & !1usize) as *mut ())
+            Shared(mode.align2())
         }
     }
 }
@@ -1151,7 +1151,7 @@ defimpl! {[] () where { } {
         this.ptr = ptr;
 
         let nominal_mode = this.storage.allocate_b(shared);
-        this.mode = (1usize | (nominal_mode as usize)) as *mut ();
+        this.mode = nominal_mode.unalign2() as *mut ();
         this
     }
 
@@ -1256,16 +1256,13 @@ defimpl! {[] () where { } {
                     // new borrowed address is by hand.
                     let owned_base = unsafe {
                         this.storage.get_ptr_a(ptr)
-                    } as *const OWNED as usize;
-                    let owned_end = owned_base + mem::size_of::<OWNED>();
+                    }.address();
+                    let owned_size = mem::size_of::<OWNED>();
                     // Call borrow() again instead of using our own deref()
                     // since `Phantomcow` can't do the latter.
-                    let mut borrowed_ptr = unsafe {
+                    let borrowed_ptr = unsafe {
                         this.storage.get_ptr_a(ptr)
                     }.borrow() as *const BORROWED;
-                    let borrowed_address: &mut usize = unsafe {
-                        mem::transmute(&mut borrowed_ptr)
-                    };
 
                     // These steps need to be uninterupted by safe function
                     // calls, as any panics would result in dangling pointers.
@@ -1283,22 +1280,17 @@ defimpl! {[] () where { } {
                         this.storage.deallocate_into_a(ptr)
                     });
 
-                    if *borrowed_address >= owned_base &&
-                        *borrowed_address < owned_end
-                    {
+                    if borrowed_ptr.within(owned_base, owned_size) {
                         // unwrap() won't panic since we just wrote `Some`
                         // above.
-                        let new_base = holder.as_ref().unwrap()
-                            as *const OWNED as usize;
-                        *borrowed_address =
-                            // Parentheses are needed to avoid overflow
-                            new_base + (*borrowed_address - owned_base);
+                        let new_base = holder.as_ref().unwrap().address();
+                        borrowed_ptr.rebase(owned_base, new_base)
+                    } else {
+                        borrowed_ptr
                     }
-
-                    borrowed_ptr
                 };
                 this.storage = new_storage;
-                this.mode = (1usize | (shared_ptr as usize)) as *mut ();
+                this.mode = shared_ptr.unalign2() as *mut ();
                 this.ptr.store_ptr(internal_ptr);
                 // End uninterrupted section
 
@@ -1471,21 +1463,19 @@ defimpl! {[] () where { } {
 
         // Adjust the pointer if needed
         if STORAGE::is_internal_storage() {
-            let self_start = self as *mut Self as usize;
-            let self_end = self_start + mem::size_of::<Self>();
+            let self_start = self.address();
+            let self_size = mem::size_of::<Self>();
 
-            let ptr_address: &mut usize = mem::transmute(&mut borrowed_ptr);
-
-            if *ptr_address >= self_start && *ptr_address < self_end {
-                debug_assert!(*ptr_address - self_start <
+            if borrowed_ptr.within(self_start, self_size) {
+                debug_assert!(borrowed_ptr.address() - self_start <
                               MAX_INTERNAL_BORROW_DISPLACEMENT * 3/2,
                               "Borrowed pointer displaced too far from \
                                base address (supercow at {:x}, self at {:x}, \
                                borrowed to {:x}", self_start,
-                              &self.storage as *const STORAGE as usize,
-                              *ptr_address);
+                              (&self.storage).address(),
+                              borrowed_ptr.address());
 
-                *ptr_address -= self_start;
+                borrowed_ptr = borrowed_ptr.rebase(self_start, 0);
             }
         }
 
@@ -1562,16 +1552,14 @@ defimpl! {[] (Deref for) where {
     type Target = BORROWED;
     #[inline]
     fn deref(&self) -> &BORROWED {
-        let self_address = self as *const Self as usize;
+        let self_address = self.address();
 
         let mut target_ref = self.ptr.get_ptr();
         unsafe {
-            let target_address: &mut usize = mem::transmute(&mut target_ref);
-            let nominal_address = *target_address;
             if STORAGE::is_internal_storage() &&
-                nominal_address < MAX_INTERNAL_BORROW_DISPLACEMENT
+                target_ref.within(0, MAX_INTERNAL_BORROW_DISPLACEMENT)
             {
-                *target_address = nominal_address + self_address;
+                target_ref = target_ref.rebase(0, self_address);
             }
             &*target_ref
         }
@@ -1769,6 +1757,84 @@ defimpl! {[] (Hash for) where {
         (**self).hash(h)
     }
 } }
+
+trait ReferenceExt {
+    fn address(&self) -> usize;
+}
+impl<'a, T : ?Sized + 'a> ReferenceExt for &'a T {
+    #[inline]
+    fn address(&self) -> usize {
+        (*self) as *const T as *const () as usize
+    }
+}
+impl<'a, T : ?Sized + 'a> ReferenceExt for &'a mut T {
+    #[inline]
+    fn address(&self) -> usize {
+        (*self) as *const T as *const () as usize
+    }
+}
+
+unsafe trait PfrExt : Copy {
+    /// Returns the address of this pointer.
+    #[inline]
+    fn address(self) -> usize {
+        let saddr: &usize = unsafe {
+            mem::transmute(&self)
+        };
+        *saddr
+    }
+
+    /// Returns a pointer with the same extra data as `self`, but with the
+    /// given new `address`.
+    #[inline]
+    fn with_address(mut self, address: usize) -> Self {
+        let saddr: &mut usize = unsafe {
+            mem::transmute(&mut self)
+        };
+        *saddr = address;
+
+        let saddr: &mut Self = unsafe {
+            mem::transmute(saddr)
+        };
+        *saddr
+    }
+
+    /// Returns whether this pointer is within the allocation starting at
+    /// `base` and with size `size` (bytes).
+    #[inline]
+    fn within(self, base: usize, size: usize) -> bool {
+        let a = self.address();
+        a >= base && a < (base + size)
+    }
+
+    /// Adjusts this pointer from being based at `old_base` to being based at
+    /// `new_base` (assuming this pointer is within the allocation starting at
+    /// `old_base`).
+    #[inline]
+    fn rebase(self, old_base: usize, new_base: usize) -> Self {
+        self.with_address(new_base + (self.address() - old_base))
+    }
+
+    /// Returns whether this pointer has 2-byte alignment.
+    #[inline]
+    fn is_2_aligned(self) -> bool {
+        0 == (self.address() & 1usize)
+    }
+
+    /// Clears bit 0 of this pointer.
+    #[inline]
+    fn align2(self) -> Self {
+        self.with_address(self.address() & !1usize)
+    }
+
+    /// Sets bit 0 of this pointer.
+    #[inline]
+    fn unalign2(self) -> Self {
+        self.with_address(self.address() | 1usize)
+    }
+}
+unsafe impl<T : PointerFirstRef> PfrExt for T { }
+unsafe impl<T : ?Sized> PfrExt for *mut T { }
 
 #[cfg(test)]
 mod misc_tests {

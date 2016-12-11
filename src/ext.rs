@@ -177,7 +177,7 @@ where T : Borrow<Path> {
 /// a reference and perform address arithmetic upon it.
 ///
 /// There is no utility of applying this trait to anything other than a const
-/// reference.
+/// pointer.
 ///
 /// ## Unsafety
 ///
@@ -186,9 +186,10 @@ where T : Borrow<Path> {
 /// need to point to anything in particular) or if other parts of the type
 /// contain address-dependent information.
 ///
-/// Behaviour is undefined if the reference has any `Drop` implementation,
+/// Behaviour is undefined if the pointer has any `Drop` implementation,
 /// should a future Rust version make such things possible.
-pub unsafe trait PointerFirstRef { }
+pub unsafe trait PointerFirstRef : Copy { }
+
 unsafe impl<T : Sized> PointerFirstRef for *const T { }
 unsafe impl<T> PointerFirstRef for *const [T] { }
 unsafe impl PointerFirstRef for *const str { }
