@@ -223,6 +223,8 @@ unsafe impl <T> SharedFrom<Arc<T>> for Arc<T> {
 ///
 /// `Supercow` relies strongly on the contracts of the functions in this trait
 /// being implemented correctly.
+///
+/// No function may mutate the `A` or `B` values.
 pub unsafe trait OwnedStorage<A, B> : Default {
     /// Allocates the given owned value.
     ///

@@ -1220,8 +1220,7 @@ defimpl! {[] () where { } {
                 let unboxed = SHARED::new_two_step();
                 let mut new_storage: STORAGE = Default::default();
                 let shared_ptr = new_storage.allocate_b(unboxed);
-                let internal_ptr: *const BORROWED;
-                {
+                let internal_ptr: *const BORROWED = {
                     // `deref_holder` is technically allowed to panic. In
                     // practise it isn't expected to since any implementation
                     // would be trivial. If it *does*, we're still safe, but we
@@ -1231,14 +1230,73 @@ defimpl! {[] () where { } {
                             .deref_holder()
                     };
 
+                    // The natural way to determine `internal_ptr` below would
+                    // be to first write into holder, then do
+                    // internal_ptr = holder.as_ref().unwrap().borrow();
+                    //
+                    // But this isn't safe since `borrow()` could panic and we
+                    // have dangling pointers everywhere.
+                    //
+                    // But we can take advantage of three facts:
+                    //
+                    // - The memory returned by `borrow()` the last time we
+                    // called it must remain valid during these operations
+                    // since the owner is not being mutated.
+                    //
+                    // - Moving the owned value is just a `memcpy()`. This
+                    // means anything outside of it remains valid and at the
+                    // same address.
+                    //
+                    // - Anything _inside_ the owned value will be valid at the
+                    // same relative position at whatever new address the value
+                    // obtains below.
+                    //
+                    // So what we do instead is determine whether the borrowed
+                    // value is internal or external and the calculate what the
+                    // new borrowed address is by hand.
+                    let owned_base = unsafe {
+                        this.storage.get_ptr_a(ptr)
+                    } as *const OWNED as usize;
+                    let owned_end = owned_base + mem::size_of::<OWNED>();
+                    // Call borrow() again instead of using our own deref()
+                    // since `Phantomcow` can't do the latter.
+                    let mut borrowed_ptr = unsafe {
+                        this.storage.get_ptr_a(ptr)
+                    }.borrow() as *const BORROWED;
+                    let borrowed_address: &mut usize = unsafe {
+                        mem::transmute(&mut borrowed_ptr)
+                    };
+
                     // These steps need to be uninterupted by safe function
                     // calls, as any panics would result in dangling pointers.
+                    // Specifically:
+                    //
+                    // - `mode` is a dangling pointer until we both it and
+                    // `storage` below. But we can't set storage until we've
+                    // moved the value out of it.
+                    //
+                    // - `ptr` is a dangling pointer until we borrow the shared
+                    // value below. Because of this, we can't eliminate the
+                    // `mode` case by setting it to null, since we don't have
+                    // anything `ptr` can legally point to.
                     *holder = Some(unsafe {
                         this.storage.deallocate_into_a(ptr)
                     });
-                    // TODO This is in a rather precarious place.
-                    internal_ptr = holder.as_ref().unwrap().borrow();
-                }
+
+                    if *borrowed_address >= owned_base &&
+                        *borrowed_address < owned_end
+                    {
+                        // unwrap() won't panic since we just wrote `Some`
+                        // above.
+                        let new_base = holder.as_ref().unwrap()
+                            as *const OWNED as usize;
+                        *borrowed_address =
+                            // Parentheses are needed to avoid overflow
+                            new_base + (*borrowed_address - owned_base);
+                    }
+
+                    borrowed_ptr
+                };
                 this.storage = new_storage;
                 this.mode = (1usize | (shared_ptr as usize)) as *mut ();
                 this.ptr.store_ptr(internal_ptr);
