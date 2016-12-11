@@ -10,12 +10,24 @@
 
 //! `Supercow` is `Cow` on steroids.
 //!
-//! `Supercow` provides a mechanism for making APIs that accept very general
-//! references while maintaining very low overhead for usages not involving
-//! heavy-weight references (e.g, `Arc`). Though nominally similar to `Cow` in
-//! structure (and being named after it), `Supercow` does not require the
-//! containee to be `Clone` or `ToOwned` unless operations inherently depending
-//! on either are invoked.
+//! `Supercow` provides a mechanism for making APIs that accept or return very
+//! general references while maintaining very low overhead for usages not
+//! involving heavy-weight references (e.g, `Arc`). Though nominally similar to
+//! `Cow` in structure (and being named after it), `Supercow` does not require
+//! the containee to be `Clone` or `ToOwned` unless operations inherently
+//! depending on either are invoked.
+//!
+//! `Supercow` allows you to
+//!
+//! - Return values with ownership semantics decided at run-time;
+//!
+//! - Write APIs that allow client code to manage its resources however it
+//! wants;
+//!
+//! - Perform efficient copy-on-write and data sharing;
+//!
+//! - Avoid cloning until absolutely necessary, even if the point at which it
+//! becomes necessary is determined dynamically.
 //!
 //! # Quick Start
 //!
@@ -23,7 +35,7 @@
 //!
 //! In many cases, you can think of a `Supercow` as having only one lifetime
 //! parameter and one type parameter, corresponding to the lifetime and type of
-//! an immutable reference.
+//! an immutable reference, i.e., `Supercow<'a, Type>` ⇒ `&'a Type`.
 //!
 //! ```
 //! extern crate supercow;
@@ -31,42 +43,56 @@
 //! use std::sync::Arc;
 //! use supercow::Supercow;
 //!
+//! // This takes a `Supercow`, so it can accept owned, borrowed, or shared
+//! // values with the same API. The calls to it are annotated below.
+//! //
+//! // Normally a function like this would elide the lifetime and/or use an
+//! // `Into` conversion, but here it is written out for clarity.
+//! fn assert_is_forty_two<'a>(s: Supercow<'a, u32>) {
+//!   // `Supercow` can be dereferenced just like a normal reference.
+//!   assert_eq!(42, *s);
+//! }
+//!
 //! # fn main() {
 //! // Declare some data we want to reference.
 //! let forty_two = 42u32;
 //! // Make a Supercow referencing the above.
-//! // N.B. Type inference doesn't work reliably if there is nothing explicitly
-//! // typed to which the Supercow is passed, so we declare the type of this
-//! // variable explicitly.
-//! let mut a: Supercow<u32> = Supercow::borrowed(&forty_two);
-//! // We can deref `a` to a `u32`, and also see that it does
-//! // indeed reference `forty_two`.
-//! assert_eq!(42, *a);
+//! let mut a = Supercow::borrowed(&forty_two);
+//! // It dereferences to the value of `forty_two`.
+//! assert_is_forty_two(a.clone());             // borrowed
+//! // And we can see that it actually still *points* to forty_two as well.
 //! assert_eq!(&forty_two as *const u32, &*a as *const u32);
 //!
-//! // Clone `a` so that it also points to `forty_two`.
+//! // Clone `a` so that `b` also points to `forty_two`.
 //! let mut b = a.clone();
-//! assert_eq!(42, *b);
+//! assert_is_forty_two(b.clone());             // borrowed
 //! assert_eq!(&forty_two as *const u32, &*b as *const u32);
 //!
 //! // `to_mut()` can be used to mutate `a` and `b` independently, taking
 //! // ownership as needed.
 //! *a.to_mut() += 2;
+//! // Our immutable variable hasn't been changed...
 //! assert_eq!(42, forty_two);
+//! // ...but `a` now stores the new value...
 //! assert_eq!(44, *a);
+//! // ...and `b` still points to the unmodified variable.
 //! assert_eq!(42, *b);
 //! assert_eq!(&forty_two as *const u32, &*b as *const u32);
 //!
+//! // And now we modify `b` as well, which as before affects nothing else.
 //! *b.to_mut() = 56;
 //! assert_eq!(44, *a);
 //! assert_eq!(56, *b);
 //! assert_eq!(42, forty_two);
 //!
+//! // We can call `assert_is_forty_two` with an owned value as well.
+//! assert_is_forty_two(Supercow::owned(42));   // owned
+//!
 //! // We can also use `Arc` transparently.
-//! let mut c: Supercow<u32> = Supercow::shared(Arc::new(99));
-//! assert_eq!(99, *c);
+//! let mut c = Supercow::shared(Arc::new(42));
+//! assert_is_forty_two(c.clone());             // shared
 //! *c.to_mut() += 1;
-//! assert_eq!(100, *c);
+//! assert_eq!(43, *c);
 //! # }
 //! ```
 //!
