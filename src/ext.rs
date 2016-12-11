@@ -151,10 +151,7 @@ unsafe impl<T> SafeBorrow<str> for T where T : Borrow<str> {
 unsafe impl<T> SafeBorrow<CStr> for T
 where T : Borrow<CStr> {
     fn borrow_replacement(_: &CStr) -> &CStr {
-        static EMPTY_CSTR: &'static [u8] = &[0];
-        unsafe {
-            CStr::from_bytes_with_nul_unchecked(EMPTY_CSTR)
-        }
+        Default::default()
     }
 }
 unsafe impl<T> SafeBorrow<OsStr> for T
