@@ -1121,9 +1121,10 @@ defimpl! {[] () where { } {
     where OWNED : SafeBorrow<BORROWED> {
         let mut this = unsafe { Self::empty() };
         this.mode = this.storage.allocate_a(inner);
-        // This line could panic, but `this` doesn't have anything that would
-        // run destructors at this point other than `storage`, which was
-        // initialised in an ordinary way.
+        // This line could panic, but the only thing that has not yet been
+        // initialised properly is `ptr`, which is immaterial since the
+        // `Supercow` will not escape this frame if this panics, and `Drop`
+        // does not care about `ptr`.
         unsafe { this.borrow_owned(); }
         this
     }
@@ -1131,6 +1132,8 @@ defimpl! {[] () where { } {
     /// Creates a new `Supercow` which borrows the given value.
     pub fn borrowed<T : Borrow<BORROWED> + ?Sized>(inner: &'a T) -> Self {
         let mut this = unsafe { Self::empty() };
+        // No need to write to `mode`; `empty()` returns a borrowed-mode
+        // `Supercow`.
         this.ptr.store_ptr(inner.borrow() as *const BORROWED);
         this
     }
@@ -1148,10 +1151,11 @@ defimpl! {[] () where { } {
 
     fn shared_nocvt(shared: SHARED, ptr: PTR) -> Self {
         let mut this = unsafe { Self::empty() };
+        // If something panics below, `ptr` is may become a dangling pointer.
+        // That's fine, though, because the `Supercow` will not escape the
+        // frame and `Drop` does not inspect `ptr`.
         this.ptr = ptr;
-
-        let nominal_mode = this.storage.allocate_b(shared);
-        this.mode = nominal_mode.unalign2() as *mut ();
+        this.mode = this.storage.allocate_b(shared).unalign2() as *mut ();
         this
     }
 
@@ -1428,6 +1432,8 @@ defimpl! {[] () where { } {
           STORAGE : OwnedStorage<OWNED, NS>,
           PTR : PtrRead<BORROWED> {
         match this.mode() {
+            // We can't just return `this` since we are changing the lifetime
+            // and possibly `STORAGE`.
             Owned(_) => Supercow {
                 ptr: this.ptr,
                 mode: this.mode,
@@ -1461,13 +1467,33 @@ defimpl! {[] () where { } {
         let mut borrowed_ptr = self.storage.get_ptr_a(self.mode).borrow()
             as *const BORROWED;
 
-        // Adjust the pointer if needed
+        // We have a srong assumption that nothing ever gets allocated below
+        // MAX_INTERNAL_BORROW_DISPLACEMENT, so check that in debug mode. Note
+        // that ZSTs are frequently positioned in this range; as described in
+        // the `Deref` implementation, we consider it OK to relocate them and
+        // so ignore them.
+        debug_assert!(
+            0 == mem::size_of_val(&* borrowed_ptr) ||
+            borrowed_ptr.address() >= MAX_INTERNAL_BORROW_DISPLACEMENT,
+            "Supercow: Non-ZST allocated at {:p}, which is below the \
+             minimum supported allocation address of {}",
+            borrowed_ptr, MAX_INTERNAL_BORROW_DISPLACEMENT);
+
+        // Adjust the pointer if needed. We only need to consider this case
+        // when internal storage may be in use.
         if STORAGE::is_internal_storage() {
             let self_start = self.address();
             let self_size = mem::size_of::<Self>();
 
+            // If not an internal pointer, nothing to adjust.
             if borrowed_ptr.within(self_start, self_size) {
-                debug_assert!(borrowed_ptr.address() - self_start <
+                // In debug mode, ensure that both `OWNED::borrow()` and
+                // `STORAGE` fulfilled their maximum offset contract.
+                //
+                // Note that the actual threshold is greater than the sum of
+                // the permitted offsets; here, we strictly check the maximum
+                // that the two together may produce. (Note <= and not <.)
+                debug_assert!(borrowed_ptr.address() - self_start <=
                               MAX_INTERNAL_BORROW_DISPLACEMENT * 3/2,
                               "Borrowed pointer displaced too far from \
                                base address (supercow at {:x}, self at {:x}, \
@@ -1475,6 +1501,10 @@ defimpl! {[] () where { } {
                               (&self.storage).address(),
                               borrowed_ptr.address());
 
+                // Move the pointer from being based on `self` to being based
+                // on NULL. We identify this later in `Deref` by seeing that
+                // the nominal address is less than
+                // MAX_INTERNAL_BORROW_DISPLACEMENT.
                 borrowed_ptr = borrowed_ptr.rebase(self_start, 0);
             }
         }
@@ -1482,6 +1512,12 @@ defimpl! {[] () where { } {
         self.ptr.store_ptr(borrowed_ptr);
     }
 
+    /// Create an "empty" `Supercow`.
+    ///
+    /// The value must not be exposed to the outside world as it has a null
+    /// `ptr`. However, it is safe to drop as-is as it is returned in reference
+    /// mode and has no uninitialised content as far as the compiler is
+    /// concerned.
     unsafe fn empty() -> Self {
         Supercow {
             ptr: PTR::new(),
@@ -1513,6 +1549,8 @@ defimpl! {[] (RefParent for) where {
 /// This is similar to the `Ref` used with `RefCell`.
 pub struct Ref<'a, P>
 where P : RefParent + 'a {
+    // This is a pointer and not a reference as otherwise we would have two
+    // `&mut` references into the parent, which is illegal.
     r: *mut P::Owned,
     parent: &'a mut P,
 }
@@ -1552,14 +1590,15 @@ defimpl! {[] (Deref for) where {
     type Target = BORROWED;
     #[inline]
     fn deref(&self) -> &BORROWED {
-        let self_address = self.address();
-
         let mut target_ref = self.ptr.get_ptr();
         unsafe {
+            // If pointers may be stored internally to `self` and the nominal
+            // pointer is based on NULL (as positioned by `borrow_owned()`),
+            // move the pointer to be based on `self`.
             if STORAGE::is_internal_storage() &&
                 target_ref.within(0, MAX_INTERNAL_BORROW_DISPLACEMENT)
             {
-                target_ref = target_ref.rebase(0, self_address);
+                target_ref = target_ref.rebase(0, self.address());
             }
             &*target_ref
         }
