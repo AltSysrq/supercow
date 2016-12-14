@@ -1503,7 +1503,7 @@ defimpl! {[] () where { } {
     /// If `this` is borrowed, clone the inner value so that the new `Supercow`
     /// has a `'static` lifetime.
     ///
-    /// If the inner value is owned or borrowed, this simply returns the input
+    /// If the inner value is owned or shared, this simply returns the input
     /// unchanged.
     ///
     /// ## Example
