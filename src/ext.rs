@@ -16,7 +16,6 @@ use std::mem;
 use std::path::Path;
 use std::ptr;
 use std::rc::Rc;
-use std::slice;
 use std::sync::Arc;
 
 /// Marker trait indicating a `Deref`-like which always returns the same
@@ -75,8 +74,8 @@ pub trait TwoStepShared<OWNED, BORROWED : ?Sized> {
     /// ## Unsafety
     ///
     /// This call may assume that `self` was produced by a call to
-    /// `new_two_step` on the same trait. (This is to allow downcasting without
-    /// requiring `Any` which in turn requires `'static`.)
+    /// `new_two_step` on the same implementation. (This is to allow
+    /// downcasting without requiring `Any` which in turn requires `'static`.)
     ///
     /// The address of the value inside `Some` may not be altered by the
     /// implementation.
@@ -98,6 +97,7 @@ macro_rules! twostepwrapper { ($outer:ident, $inner:ident) => {
             $outer($inner::new(None), PhantomData)
         }
         unsafe fn deref_holder(&mut self) -> &mut Option<T> {
+            // Safety: No operation here is actually unsafe.
             $inner::get_mut(&mut self.0)
                 .expect("Two-step wrapper already cloned")
         }
@@ -140,9 +140,7 @@ unsafe impl<T : ?Sized> SafeBorrow<T> for T {
 }
 unsafe impl<B, T> SafeBorrow<[B]> for T where T : Borrow<[B]> {
     fn borrow_replacement(_: &[B]) -> &[B] {
-        unsafe {
-            slice::from_raw_parts(1 as usize as *const B, 0)
-        }
+        &[]
     }
 }
 unsafe impl<T> SafeBorrow<str> for T where T : Borrow<str> {
@@ -200,7 +198,7 @@ unsafe impl PointerFirstRef for *const ::std::path::Path { }
 /// ## Unsafety
 ///
 /// The conversion may not invalidate the address returned by
-/// `T::const_deref()`.
+/// `T::const_deref()` if `T` is `ConstDeref`.
 pub unsafe trait SharedFrom<T> {
     /// Converts the given `T` to `Self`.
     fn shared_from(t: T) -> Self;
@@ -553,5 +551,13 @@ unsafe impl<T : ?Sized> PtrRead<T> for *const T {
 pub trait RefParent {
     type Owned : ?Sized;
 
+    /// Notifies `self` that a `Ref` has been dropped.
+    ///
+    /// ## Unsafety
+    ///
+    /// Behaviour is undefined if `self` is not in owned mode.
+    ///
+    /// Behaviour is undefined if a mutable reference to the owned value in
+    /// `self` is still live.
     unsafe fn supercow_ref_drop(&mut self);
 }

@@ -801,11 +801,30 @@ use self::ext::*;
 // to carry that part of the type information.
 #[macro_export]
 macro_rules! supercow_features {
+    // Since we have special cases (and sometimes syntax) for the trait list,
+    // handling the trait list is a bit difficult. Basically, we need to
+    // massage it into a form where we can properly match everything at once.
+    //
+    // What we basically do here is match the head token tree one at a time,
+    // and move it into one of several bracketed lists that come before the
+    // unparsed list. This allows us to match the special cases.
+    //
+    // The bracketed lists are:
+    //
+    // - Clone. Either empty or `[Clone clone_boxed]`. There needs to be
+    // useful tokens to match here so that we can "iterate" over them to
+    // conditionally generate related code.
+    //
+    // - Two-step. Contains just the bare inner type. We "iterate" over the
+    // type to conditionally generate the related code.
+    //
+    // - Everything else. A comma-separated list of identifiers.
     ($(#[$meta:meta])* pub trait $feature_name:ident: $($stuff:tt)*) => {
         supercow_features!(@_ACCUM $(#[$meta])* pub trait $feature_name:
                            [] [] [] $($stuff)*);
     };
 
+    // Special case for Clone
     (@_ACCUM $(#[$meta:meta])* pub trait $feature_name:ident:
      $clone:tt $twostep:tt [$($others:tt),*] Clone $($more:tt)*) => {
         supercow_features!(@_ACCUM $(#[$meta])* pub trait $feature_name:
@@ -813,6 +832,7 @@ macro_rules! supercow_features {
                            $($more)*);
     };
 
+    // Special case for Two-Step
     (@_ACCUM $(#[$meta:meta])* pub trait $feature_name:ident:
      $clone:tt $twostep:tt [$($others:tt),*]
      TwoStepShared($($inner:tt)*)
@@ -822,12 +842,20 @@ macro_rules! supercow_features {
                            $($more)*);
     };
 
+    // Since we match token-trees instead of identifiers or similar, we get
+    // comma as a bare token. Simply throw it away.
+    //
+    // This does mean people can invoke the macro without the commata, though
+    // we don't officially support it. It would be possible to adjust the macro
+    // to reject invocations missing commas, but there the error would not be
+    // particularly clear, so for now just be tolerant.
     (@_ACCUM $(#[$meta:meta])* pub trait $feature_name:ident:
      $clone:tt $twostep:tt [$($others:tt),*], $($more:tt)*) => {
         supercow_features!(@_ACCUM $(#[$meta])* pub trait $feature_name:
                            $clone $twostep [$($others)*] $($more)*);
     };
 
+    // General case for non-special traits.
     (@_ACCUM $(#[$meta:meta])* pub trait $feature_name:ident:
      $clone:tt $twostep:tt [$($others:ident),*] $other:ident $($more:tt)*) => {
         supercow_features!(@_ACCUM $(#[$meta])* pub trait $feature_name:
@@ -835,6 +863,8 @@ macro_rules! supercow_features {
                            $($more)*);
     };
 
+    // Once there's no unexamined items left, we can actually fall through to
+    // defining stuff.
     (@_ACCUM $(#[$meta:meta])* pub trait $feature_name:ident:
      $clone:tt $twostep:tt [$($others:ident),*]) => {
         supercow_features!(@_DEFINE $(#[$meta])* pub trait $feature_name:
@@ -848,6 +878,8 @@ macro_rules! supercow_features {
      [$($req:ident),*]) => {
         $(#[$meta])*
         pub trait $feature_name<'a>: $($req +)* 'a {
+            // NB "Iterate" over the clone section to conditionally generate
+            // this code.
             $(
             /// Clone this value, and then immediately put it into a `Box`
             /// behind a trait object of this trait.
@@ -873,6 +905,8 @@ macro_rules! supercow_features {
                 self as *mut Self as *mut ()
             }
         }
+        // This implementation is safe -- all we do is move `T`, so if `T` is
+        // `ConstDeref`, its returned address will not be affected.
         unsafe impl<'a, T : $feature_name<'a>> $crate::ext::SharedFrom<T>
         for Box<$feature_name<'a> + 'a> {
             fn shared_from(t: T) -> Self {
@@ -900,6 +934,10 @@ macro_rules! supercow_features {
             unsafe fn deref_holder(&mut self) -> &mut Option<T> {
                 <$twostep_inner<T,S> as $crate::ext::TwoStepShared<T, S>>::
                 deref_holder(
+                    // Unsafe downcast from $feature_name to the declared
+                    // two-step type. This is safe since the contract of
+                    // `deref_holder()` guarantees that this value was
+                    // constructed by `new_two_step()`.
                     &mut* ($feature_name::self_address_mut(&mut **self)
                            as *mut $twostep_inner<T,S>))
             }
@@ -1145,18 +1183,25 @@ defimpl! {[] () where { } {
     /// This can create a `Supercow` with a `'static` lifetime.
     pub fn owned(inner: OWNED) -> Self
     where OWNED : SafeBorrow<BORROWED> {
+        // Safety: The invalid `ptr` does not escape; either the function sets
+        // it properly, or panics and the value is destroyed.
         let mut this = unsafe { Self::empty() };
         this.mode = this.storage.allocate_a(inner);
         // This line could panic, but the only thing that has not yet been
         // initialised properly is `ptr`, which is immaterial since the
         // `Supercow` will not escape this frame if this panics, and `Drop`
         // does not care about `ptr`.
+        //
+        // Safety: We know that the value is in owned mode since we just
+        // constructed it.
         unsafe { this.borrow_owned(); }
         this
     }
 
     /// Creates a new `Supercow` which borrows the given value.
     pub fn borrowed<T : Borrow<BORROWED> + ?Sized>(inner: &'a T) -> Self {
+        // Safety: The invalid `ptr` value will be overwritten before this
+        // function returns, and the value is destroyed on panic.
         let mut this = unsafe { Self::empty() };
         // No need to write to `mode`; `empty()` returns a borrowed-mode
         // `Supercow`.
@@ -1176,6 +1221,8 @@ defimpl! {[] () where { } {
     }
 
     fn shared_nocvt(shared: SHARED, ptr: PTR) -> Self {
+        // Safety: The invalid `ptr` value will be overwritten before this
+        // function returns, and the value is destroyed on panic.
         let mut this = unsafe { Self::empty() };
         // If something panics below, `ptr` is may become a dangling pointer.
         // That's fine, though, because the `Supercow` will not escape the
@@ -1218,6 +1265,7 @@ defimpl! {[] () where { } {
             }),
 
             Shared(s) => Some(Self::shared_nocvt(unsafe {
+                // Safety: `mode` indicates we have storage b allocated.
                 this.storage.get_ptr_b(s)
             }.clone(), this.ptr)),
         }
@@ -1256,6 +1304,7 @@ defimpl! {[] () where { } {
                     // would be trivial. If it *does*, we're still safe, but we
                     // may leak the storage allocated above.
                     let holder = unsafe {
+                        // Safety: We just allocated new_storage b above.
                         new_storage.get_mut_b(shared_ptr)
                             .deref_holder()
                     };
@@ -1285,17 +1334,22 @@ defimpl! {[] () where { } {
                     // value is internal or external and the calculate what the
                     // new borrowed address is by hand.
                     let owned_base = unsafe {
+                        // Safety: `mode` indicates we are in owned mode and so
+                        // have storage a allocated.
                         this.storage.get_ptr_a(ptr)
                     }.address();
                     let owned_size = mem::size_of::<OWNED>();
                     // Call borrow() again instead of using our own deref()
                     // since `Phantomcow` can't do the latter.
                     let borrowed_ptr = unsafe {
+                        // Safety: `mode` indicates we are in owned mode and so
+                        // have storage a allocated.
                         this.storage.get_ptr_a(ptr)
                     }.borrow() as *const BORROWED;
 
                     // These steps need to be uninterrupted by safe function
                     // calls, as any panics would result in dangling pointers.
+                    //
                     // Specifically:
                     //
                     // - `mode` is a dangling pointer until we both it and
@@ -1307,6 +1361,11 @@ defimpl! {[] () where { } {
                     // `mode` case by setting it to null, since we don't have
                     // anything `ptr` can legally point to.
                     *holder = Some(unsafe {
+                        // Safety: `mode` indicates we are in owned mode and so
+                        // have storage a allocated.
+                        //
+                        // See also comment above, as this operation causes
+                        // `this.mode` and `this.ptr` to be invalid.
                         this.storage.deallocate_into_a(ptr)
                     });
 
@@ -1323,8 +1382,13 @@ defimpl! {[] () where { } {
                 this.mode = shared_ptr.unalign2() as *mut ();
                 this.ptr.store_ptr(internal_ptr);
                 // End uninterrupted section
+                // `this.mode` now indicates shared mode, and `this.ptr` points
+                // into `this.storage` which has been replaced by
+                // `new_storage`.
 
                 Self::shared_nocvt(unsafe {
+                    // Safety: We just allocated new_storage b above and then
+                    // moved it into this.storage.
                     this.storage.get_ptr_b(shared_ptr)
                 }.clone(), this.ptr)
             },
@@ -1339,6 +1403,7 @@ defimpl! {[] () where { } {
             },
 
             Shared(s) => Self::shared_nocvt(unsafe {
+                // Safety: `mode` indicates we have storage b allocated.
                 this.storage.get_ptr_b(s)
             }.clone(), this.ptr),
         }
@@ -1375,6 +1440,8 @@ defimpl! {[] () where { } {
     pub fn extract_ref(this: &Self) -> Option<&'a BORROWED>
     where PTR : PtrRead<BORROWED> {
         match this.mode() {
+            // Unsafe to turn the pointer (which we *know* to have lifetime
+            // at least 'a, *if* the mode is borrowed) into a reference.
             Borrowed => Some(unsafe { &*this.ptr.get_ptr() }),
             _ => None,
         }
@@ -1388,6 +1455,7 @@ defimpl! {[] () where { } {
           PTR : PtrRead<BORROWED> {
         match this.mode() {
             Owned(ptr) => {
+                // Safety: `mode` indicates that storage a is allocated.
                 unsafe { this.storage.deallocate_into_a(ptr) }
             },
             _ => (*this).to_owned(),
@@ -1419,9 +1487,14 @@ defimpl! {[] () where { } {
         // Clear out `ptr` if it points somewhere unstable
         let old_ptr = self.ptr.get_ptr();
         self.ptr.store_ptr(OWNED::borrow_replacement(
+            // Safety: We know old_ptr is a valid pointer for the lifetime of
+            // `self`; all we do here is turn it into a short-lived reference.
             unsafe { &*old_ptr }) as *const BORROWED);
 
         Ref {
+            // Safety: We know that `self` is now in owned mode and so has
+            // storage a allocated. We also know that in owned mode,
+            // `self.mode` is the exact pointer value that storage returned.
             r: unsafe { self.storage.get_mut_a(self.mode) } as *mut OWNED,
             parent: self,
         }
@@ -1454,11 +1527,16 @@ defimpl! {[] () where { } {
     where OWNED : SafeBorrow<BORROWED>,
           BORROWED : ToOwned<Owned = OWNED>,
           PTR : PtrRead<BORROWED> {
+        // Call default() before the below in case it panics.
+        let new_storage = STORAGE::default();
+
         match this.mode() {
             Owned(_) | Shared(_) => Supercow {
                 ptr: this.ptr,
+                // mem::replace is critical for safety, otherwise we would
+                // double-free when `this` is dropped.
                 mode: mem::replace(&mut this.mode, ptr::null_mut()),
-                storage: mem::replace(&mut this.storage, Default::default()),
+                storage: mem::replace(&mut this.storage, new_storage),
                 _owned: PhantomData,
                 _borrowed: PhantomData,
                 _shared: PhantomData,
@@ -1496,13 +1574,18 @@ defimpl! {[] () where { } {
           BORROWED : ToOwned<Owned = OWNED>,
           STORAGE : OwnedStorage<OWNED, NS>,
           PTR : PtrRead<BORROWED> {
+        // Call default() before the below in case it panics
+        let new_storage = STORAGE::default();
+
         match this.mode() {
             // We can't just return `this` since we are changing the lifetime
             // and possibly `STORAGE`.
             Owned(_) => Supercow {
                 ptr: this.ptr,
+                // mem::replace is critical for safety, otherwise we would
+                // double-free when `this` is dropped.
                 mode: mem::replace(&mut this.mode, ptr::null_mut()),
-                storage: mem::replace(&mut this.storage, Default::default()),
+                storage: mem::replace(&mut this.storage, new_storage),
                 _owned: PhantomData,
                 _borrowed: PhantomData,
                 _shared: PhantomData,
@@ -1515,10 +1598,15 @@ defimpl! {[] () where { } {
     /// Converts this `Supercow` into a `Phantomcow`.
     pub fn phantom(mut this: Self)
                    -> Phantomcow<'a, OWNED, BORROWED, SHARED, STORAGE> {
+        // Call default() before the below in case it panics
+        let new_storage = STORAGE::default();
+
         let ret = Supercow {
             ptr: (),
+            // mem::replace is critical for safety, otherwise we would
+            // double-free when `this` is dropped.
             mode: mem::replace(&mut this.mode, ptr::null_mut()),
-            storage: mem::replace(&mut this.storage, Default::default()),
+            storage: mem::replace(&mut this.storage, new_storage),
             _owned: PhantomData,
             _borrowed: PhantomData,
             _shared: PhantomData,
@@ -1526,6 +1614,14 @@ defimpl! {[] () where { } {
         ret
     }
 
+    /// Sets `self.ptr` up for owned mode.
+    ///
+    /// `self.ptr` will either be written to a new valid value, or if this call
+    /// panics, will be left with whatever value it had before.
+    ///
+    /// ## Unsafety
+    ///
+    /// `self` must be in owned mode, and storage slot a allocated.
     unsafe fn borrow_owned(&mut self)
     where OWNED : SafeBorrow<BORROWED> {
         let mut borrowed_ptr = self.storage.get_ptr_a(self.mode).borrow()
@@ -1573,6 +1669,9 @@ defimpl! {[] () where { } {
             }
         }
 
+        // Now that we've determined the new pointer value, write it back. Even
+        // if we weren't using the `PTR` abstraction, we would still want to
+        // delay this to ensure that this call is atomic.
         self.ptr.store_ptr(borrowed_ptr);
     }
 
@@ -1604,6 +1703,8 @@ defimpl! {[] (RefParent for) where {
     type Owned = OWNED;
 
     unsafe fn supercow_ref_drop(&mut self) {
+        // Safety: Contract guarantees we are in owned mode and that there are
+        // no live borrows of the owned value remaining.
         self.borrow_owned()
     }
 } }
@@ -1626,6 +1727,7 @@ where P : RefParent + 'a {
 
     #[inline]
     fn deref(&self) -> &P::Owned {
+        // Unsafety here and below: Just converting reference to pointer.
         unsafe { &*self.r }
     }
 }
@@ -1644,6 +1746,11 @@ where P : RefParent + 'a {
     fn drop(&mut self) {
         // The value of `OWNED::borrow()` may have changed, so recompute
         // everything instead of backing the old values up.
+        //
+        // Safety: The `Ref` could not have been constructed if the parent were
+        // not in owned mode. We know there are no reborrows of `r` since the
+        // borrow checker would have prevented that as it would also be a
+        // borrow of `self`.
         unsafe { self.parent.supercow_ref_drop() }
     }
 }
@@ -1656,6 +1763,10 @@ defimpl! {[] (Deref for) where {
     fn deref(&self) -> &BORROWED {
         let mut target_ref = self.ptr.get_ptr();
         unsafe {
+            // Safety: If `self` escaped to a location where other code could
+            // call `deref()`, we know that `ptr` has been set up
+            // appropriately.
+
             // If pointers may be stored internally to `self` and the nominal
             // pointer is based on NULL (as positioned by `borrow_owned()`),
             // move the pointer to be based on `self`.
@@ -1692,6 +1803,7 @@ defimpl! {[] (Clone for) where {
     fn clone(&self) -> Self {
         match self.mode() {
             Owned(ptr) => Self::owned(unsafe {
+                // Safety: `mode` indicates storage `a` is allocated.
                 self.storage.get_ptr_a(ptr)
             }.clone()),
 
@@ -1705,6 +1817,7 @@ defimpl! {[] (Clone for) where {
             },
 
             Shared(s) => Self::shared_nocvt(unsafe {
+                // Safety: `mode` indicates storage `b` is allocated.
                 self.storage.get_ptr_b(s)
             }.clone(), self.ptr),
         }
@@ -1882,6 +1995,8 @@ unsafe trait PfrExt : Copy {
     #[inline]
     fn address(self) -> usize {
         let saddr: &usize = unsafe {
+            // Safety, here and below: We know `Self` is a `PointerFirstRef` or
+            // similar.
             mem::transmute(&self)
         };
         *saddr
@@ -1892,11 +2007,18 @@ unsafe trait PfrExt : Copy {
     #[inline]
     fn with_address(mut self, address: usize) -> Self {
         let saddr: &mut usize = unsafe {
+            // Safety: These transmutes are visible to the borrow checker, so
+            // we aren't violating aliasing rules.
             mem::transmute(&mut self)
         };
         *saddr = address;
 
         let saddr: &mut Self = unsafe {
+            // Safety: Possibly a grey area, since we may be creating a
+            // non-native pointer out of thin air.
+            //
+            // Transmuting back to `&mut Self` makes the write dependency more
+            // explicit but is likely not strictly necessary.
             mem::transmute(saddr)
         };
         *saddr
@@ -1915,6 +2037,7 @@ unsafe trait PfrExt : Copy {
     /// `old_base`).
     #[inline]
     fn rebase(self, old_base: usize, new_base: usize) -> Self {
+        // Extra parentheses needed to avoid overflow.
         self.with_address(new_base + (self.address() - old_base))
     }
 
@@ -1925,12 +2048,18 @@ unsafe trait PfrExt : Copy {
     }
 
     /// Clears bit 0 of this pointer.
+    ///
+    /// NB This is used to restore the original pointer value from
+    /// `Supercow::mode` when indicating shared mode.
     #[inline]
     fn align2(self) -> Self {
         self.with_address(self.address() & !1usize)
     }
 
     /// Sets bit 0 of this pointer.
+    ///
+    /// NB This is used to set `Supercow::mode` to indicate shared mode (and
+    /// allocation in storage b).
     #[inline]
     fn unalign2(self) -> Self {
         self.with_address(self.address() | 1usize)
