@@ -1,5 +1,7 @@
 # Supercow
 
+[![Latest Version](https://img.shields.io/crates/v/supercow.svg)](https://crates.io/crates/supercow)
+
 `Supercow` is a versatile and low-overhead generalised reference, allowing to
 transparently work with owned or borrowed values, as well as shared-ownership
 types like `Arc`.
