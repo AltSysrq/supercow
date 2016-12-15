@@ -7,6 +7,11 @@ types like `Arc`.
 More information can be found in the
 [documentation](https://altsysrq.github.io/rustdoc/supercow/index.html).
 
+## Status
+
+Experimental. This crate is fairly well internally tested, but has not yet seen
+much serious use.
+
 ## Contribution
 
 Unless you explicitly state otherwise, any contribution intentionally submitted
